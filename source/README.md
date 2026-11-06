@@ -26,6 +26,7 @@ Where to look for a given part of the model:
 | Pre-placed structures | `polysome.py`, `mrna.py`, `er_ribosomes.py`, `microtubules.py`, `cytoskeleton.py`, `actin_patches.py`, `atp_dimers.py`, `supercomplexes.py`, `fg_mesh.py` in `pipeline/` |
 | Validation | `pipeline/val3d.py`, `scripts/s4_validate.py` |
 | Viewer data format | `pipeline/webenc.py` (format in its docstring) |
+| Motion modes from pool ensembles (optional stage 6) | `pipeline/conformers.py`, `pipeline/pool_modes.py`, `scripts/s6_motion.py` |
 
 ## Rebuilding the model
 
@@ -50,6 +51,7 @@ These are not in the repository; all are public downloads.
 | Paralog pairs | `pipeline/data/alliance_yeast_paralog_pairs.csv` | Alliance of Genome Resources |
 | AlphaFold DB proteome | `YC_AFDB_TAR` | `UP000002311_559292_YEAST_v6.tar` from the AlphaFold DB FTP site |
 | AlphaFold DB predicted dimers | `YC_DIMERS` (`homodimers/`, `heterodimers/`) | AlphaFold DB yeast homo- and heterodimer models |
+| Pool predictions (stage 6 only) | `POOL_DB` | Foldcomp database of in-house AlphaFold 3 pool predictions; not public. The fitted modes ship in `data/library/modes.bin`. |
 
 PDB assemblies are downloaded from RCSB on demand and cached.
 
@@ -63,5 +65,7 @@ The residue-bead library (`pipeline/lib/`, one `.npz` per species, about 63 MB) 
 scripts/run_all.sh        # inventory -> geometry -> packing -> validation -> web encoding
 scripts/deploy_viewer.sh  # build the viewer and install it next to the encoded data
 ```
+
+Optional stage 6, the motion modes: `POOL_DB=... scripts/s6_motion.py` after stage 5. It runs `pipeline/pool_modes.py` in a Python environment with `foldcomp` (`POOL_PY`); the fit takes about 100 minutes on 10 cores. `scripts/s6_motion.py --skip-fit` only re-encodes, e.g. with another amplitude cap (`MOTION_CAP`, nm, 0 = none).
 
 The first run of stage 1 spends most of its time on RCSB queries; after that a full rebuild takes roughly 10–15 minutes on a recent multi-core machine. Seeds are fixed throughout.

@@ -23,7 +23,7 @@ const canvas = $<HTMLCanvasElement>('gpu');
 
 const fs: FrameState = {
   cutOn: true, plane: [0, 0, 1, 0], slab: 60, colorMode: 0, regionMask: 0xFFFFFF, freeHide: 0, highlight: false,
-  selId: 0, shaded: true, organelle: false, l0px: 1.6, l1px: 2.5, minpx: 0.3, outline: 1, showMeshes: true, showLipids: true, renderScale: 1,
+  selId: 0, shaded: true, organelle: false, motion: 0, l0px: 1.6, l1px: 2.5, minpx: 0.3, outline: 1, showMeshes: true, showLipids: true, renderScale: 1,
 };
 let planeFollow = false;
 let dirty = true, lastUpdate = 0, lastFrameT = 0, quality = 'auto';
@@ -37,6 +37,8 @@ const CLASS_TYPES: Record<string, string[]> = {
   nucleosomes: ['nucleosome'],
   pores: ['NPC'],
 };
+// connected assemblies (filament subunits, pores, chromatin): illustrative motion would pull them apart
+const NO_MOTION = [...CLASS_TYPES.actin, ...CLASS_TYPES.microtubules, 'NPC', 'nucleosome'];
 let selType = -1;
 let selection: any = null;
 let tour: { i: number; phase: 'fly' | 'wait' | 'hold'; t: number } | null = null;
@@ -81,6 +83,7 @@ async function boot() {
     await R.init(lib, geo);
     typeFlags = new Uint32Array(NT);
     for (const ids of Object.values(CLASS_TYPES)) for (const id of ids) { const i = lib.byId.get(id); if (i !== undefined) typeFlags[i] |= 4; }
+    for (const id of NO_MOTION) { const i = lib.byId.get(id); if (i !== undefined) typeFlags[i] |= 8; }
     R.device.queue.writeBuffer(R.typeFlags, 0, typeFlags);
     setLoading('Compiling shaders and starting tile streaming', 0.9);
     let embedded: Record<string, Uint8Array> | undefined;
@@ -491,6 +494,7 @@ function buildUI() {
   $('modeOrg').onclick = () => setOrganelle(true);
   $<HTMLSelectElement>('colorMode').onchange = (e) => { fs.colorMode = Number((e.target as HTMLSelectElement).value); renderLegend(); dirty = true; };
   $<HTMLInputElement>('shaded').onchange = (e) => { fs.shaded = (e.target as HTMLInputElement).checked; dirty = true; };
+  $<HTMLSelectElement>('motion').onchange = (e) => { fs.motion = Number((e.target as HTMLSelectElement).value); (e.target as HTMLElement).blur(); dirty = true; };
   $<HTMLInputElement>('outlines').onchange = (e) => { fs.outline = (e.target as HTMLInputElement).checked ? 1 : 0; dirty = true; };
   renderLegend();
   // show list: named classes have their own switch (and ignore the compartment filter); "only" hides everything else
@@ -816,6 +820,7 @@ function loop(now: number) {
     dirty = true;
   }
   tourStep(now);
+  if (fs.motion > 0) dirty = true;          // illustrative motion: redraw every frame
   if (now - lastUpdate > 90) tileTick();
   if (dirty && !gpuBusy) {
     dirty = false;

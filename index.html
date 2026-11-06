@@ -99,7 +99,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
 .keys { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; }
 #toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; font-size: 12.5px; display: none; z-index: 25; }
 </style>
-  <script type="module" crossorigin src="./assets/index-CB9DOqlk.js"></script>
+  <script type="module" crossorigin src="./assets/index-BkCJ1iTI.js"></script>
 </head>
 <body>
 <canvas id="gpu" tabindex="0"></canvas>
@@ -158,6 +158,8 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
       <label class="chk"><input type="checkbox" id="shaded" checked> 3D lighting</label>
       <label class="chk"><input type="checkbox" id="outlines" checked> Outlines</label>
     </div>
+    <div class="row"><label title="Illustrative, not simulated. AlphaFold monomers move through the conformers of their pool-prediction ensembles; every molecule also wobbles as a rigid body, and other low-confidence regions flex">Motion</label>
+      <select id="motion"><option value="0" selected>Off</option><option value="1">On</option><option value="2">Exaggerated (2×)</option></select></div>
   </section>
 
   <section>

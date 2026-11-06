@@ -9,7 +9,7 @@ export const ID_INST = 0x40000000, ID_LIPID = 0x80000000, ID_FREE = 0xC0000000;
 export interface FrameState {
   cutOn: boolean; plane: [number, number, number, number]; slab: number;
   colorMode: number; regionMask: number; freeHide: number; highlight: boolean;
-  selId: number; shaded: boolean; organelle: boolean;
+  selId: number; shaded: boolean; organelle: boolean; motion: number;
   l0px: number; l1px: number; minpx: number; outline: number;
   showMeshes: boolean; showLipids: boolean; renderScale: number;
 }
@@ -28,7 +28,7 @@ export class Renderer {
   maxSlots = 4096;
   // buffers
   uni!: GPUBuffer; inst!: GPUBuffer; pageOrg!: GPUBuffer; typesBuf!: GPUBuffer; typeFlags!: GPUBuffer; palette!: GPUBuffer;
-  beads!: GPUBuffer; st!: GPUBuffer; clusters!: GPUBuffer;
+  beads!: GPUBuffer; st!: GPUBuffer; clusters!: GPUBuffer; modes!: GPUBuffer; modeCap = 0;
   counters!: GPUBuffer; list01!: GPUBuffer; listL2!: GPUBuffer; args!: GPUBuffer; cullParams!: GPUBuffer; caps!: GPUBuffer;
   lipPool!: GPUBuffer; lipPagesBuf!: GPUBuffer; lipList!: GPUBuffer; lipParams!: GPUBuffer;
   freePool!: GPUBuffer; freePagesBuf!: GPUBuffer; freeList!: GPUBuffer; freeParams!: GPUBuffer;
@@ -93,11 +93,13 @@ export class Renderer {
     this.typeFlags = mk(lib.types.length * 4, STO, 'typeFlags');
     this.palette = mk(96 * 16, STO, 'palette');
     this.beads = mk(lib.beads.byteLength, STO, 'beads');
+    this.modes = mk(Math.max(16, lib.modes.byteLength), STO, 'modes'); this.modeCap = lib.modeCap;
     this.st = mk(lib.st.byteLength, STO, 'spheretree');
     this.clusters = mk(lib.clusters.byteLength, STO, 'clusters');
     d.queue.writeBuffer(this.typesBuf, 0, lib.typeInfo);
     d.queue.writeBuffer(this.palette, 0, paletteArray());
     d.queue.writeBuffer(this.beads, 0, lib.beads);
+    d.queue.writeBuffer(this.modes, 0, lib.modes);
     d.queue.writeBuffer(this.st, 0, lib.st);
     d.queue.writeBuffer(this.clusters, 0, lib.clusters);
     this.counters = mk(32, BU.STORAGE | BU.COPY_DST | BU.COPY_SRC, 'counters');
@@ -165,7 +167,7 @@ export class Renderer {
     this.bgl.cull = L([rw(0), rw(1), rw(2), un(3, SU.COMPUTE), ro(4, SU.COMPUTE)]);
     this.bgl.cullS = L([rw(0), ro(1, SU.COMPUTE), ro(2, SU.COMPUTE), rw(3), un(4, SU.COMPUTE)]);
     this.bgl.fin = L([ro(0, SU.COMPUTE), rw(1), un(2, SU.COMPUTE)]);
-    this.bgl.l0 = L([ro(0, SU.VERTEX), ro(1, SU.VERTEX)]);
+    this.bgl.l0 = L([ro(0, SU.VERTEX), ro(1, SU.VERTEX), ro(2, SU.VERTEX)]);   // L0 and L1: beads or spheres, list, modes
     this.bgl.l2 = L([ro(0, SU.VERTEX)]);
     this.bgl.sph = L([ro(0, SU.VERTEX), ro(1, SU.VERTEX), ro(2, SU.VERTEX)]);
     this.bgl.mesh = L([un(0, VF, true)]);
@@ -232,8 +234,8 @@ export class Renderer {
     this.bg.cullLip = B(this.bgl.cullS, [this.counters, this.lipPool, this.lipPagesBuf, this.lipList, this.lipParams]);
     this.bg.cullFree = B(this.bgl.cullS, [this.counters, this.freePool, this.freePagesBuf, this.freeList, this.freeParams]);
     this.bg.fin = B(this.bgl.fin, [this.counters, this.args, this.caps]);
-    this.bg.l0 = B(this.bgl.l0, [this.beads, this.list01]);
-    this.bg.l1 = B(this.bgl.l0, [this.st, this.list01]);
+    this.bg.l0 = B(this.bgl.l0, [this.beads, this.list01, this.modes]);
+    this.bg.l1 = B(this.bgl.l0, [this.st, this.list01, this.modes]);
     this.bg.l2 = B(this.bgl.l2, [this.listL2]);
     this.bg.lip = B(this.bgl.sph, [this.lipPool, this.lipPagesBuf, this.lipList]);
     this.bg.fre = B(this.bgl.sph, [this.freePool, this.freePagesBuf, this.freeList]);
@@ -286,7 +288,7 @@ export class Renderer {
     u.set([fs.selId >>> 0, 0, fs.shaded ? 1 : 0, fs.organelle ? 1 : 0], 100);
     f.set([360 / 65535, 0.8, fs.outline, Math.min(window.devicePixelRatio || 1, 2) * fs.renderScale], 104);
     f.set([geoG[0], geoG[1], geoG[2], cam.near()], 108);
-    u.set([this.capL0, 0, 0, 0], 112);
+    u.set([this.capL0, Math.round(fs.motion * 1000), Math.round(this.modeCap * 1000), 0], 112);
     this.device.queue.writeBuffer(this.uni, 0, buf, 0, 464);
   }
 

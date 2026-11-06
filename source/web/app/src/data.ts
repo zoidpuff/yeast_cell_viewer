@@ -114,7 +114,9 @@ export interface Library {
   beads: Float32Array;         // vec4 per bead: xyz, w = bits(kind | plddt << 8)
   st: Float32Array;            // sphere tree xyzr
   clusters: ArrayBuffer;       // per cluster: vec4f centre/radius + vec4u (offset, count, 0, 0)
-  typeInfo: ArrayBuffer;       // 12 x u32 per type
+  typeInfo: ArrayBuffer;       // 16 x u32 per type
+  modes: Uint32Array;          // conformational motion modes (library/modes.bin; one zero word when absent)
+  modeCap: number;             // nm, largest excursion of one bead along its path (0 = no cap)
   nClusters: number;
   byId: Map<string, number>;
 }
@@ -127,6 +129,12 @@ export async function loadLibrary(progress: (msg: string, f: number) => void): P
   progress('Loading residue coordinates (2.5 M beads)', 0.06);
   const raw = await fetchBin('library/beads.bin', (n, t) => progress('Loading residue coordinates (2.5 M beads)', 0.06 + 0.5 * (t ? n / t : 0)));
   const st = new Float32Array(await fetchBin('library/spheretree.bin'));
+  // optional: pool-ensemble motion modes per AlphaFold monomer type (exploration branch)
+  let modes = new Uint32Array(4), modeIdx: Record<string, number[]> = {}, modeCap = 0;
+  try {
+    const mj = await fetchJson('library/modes.json');
+    modes = new Uint32Array(await fetchBin('library/modes.bin')); modeIdx = mj.types; modeCap = mj.cap ?? 1.5;
+  } catch { /* no modes in this build */ }
   progress('Building level-of-detail clusters', 0.6);
   const nB = raw.byteLength / 8;
   const i16 = new Int16Array(raw), u8 = new Uint8Array(raw);
@@ -139,7 +147,7 @@ export async function loadLibrary(progress: (msg: string, f: number) => void): P
   let nC = 0;
   for (const t of types) nC += Math.ceil(t.nb / 64);
   const clusters = new ArrayBuffer(nC * 32), cf = new Float32Array(clusters), cu = new Uint32Array(clusters);
-  const typeInfo = new ArrayBuffer(types.length * 48), tu = new Uint32Array(typeInfo), tf = new Float32Array(typeInfo);
+  const typeInfo = new ArrayBuffer(types.length * 64), tu = new Uint32Array(typeInfo), tf = new Float32Array(typeInfo);
   let c = 0;
   types.forEach((t, ti) => {
     const c0 = c;
@@ -156,22 +164,24 @@ export async function loadLibrary(progress: (msg: string, f: number) => void): P
         const j = 4 * (b0 + k);
         r = Math.max(r, Math.hypot(beads[j] - cx, beads[j + 1] - cy, beads[j + 2] - cz));
       }
-      cf[8 * c] = cx; cf[8 * c + 1] = cy; cf[8 * c + 2] = cz; cf[8 * c + 3] = r + 0.85;
+      cf[8 * c] = cx; cf[8 * c + 1] = cy; cf[8 * c + 2] = cz; cf[8 * c + 3] = r + 0.85 + (modeIdx[ti]?.[3] ?? 0);
       cu[8 * c + 4] = b0; cu[8 * c + 5] = n;
       c++;
     }
     const sp = SPECIAL[t.id];
     const isPDB = t.src === 'PDB';
-    tu[12 * ti + 0] = t.bo; tu[12 * ti + 1] = t.nb; tu[12 * ti + 2] = c0; tu[12 * ti + 3] = c - c0;
-    tu[12 * ti + 4] = t.so; tu[12 * ti + 5] = t.sn;
-    tf[12 * ti + 6] = t.br; tf[12 * ti + 7] = Math.sqrt(5 / 3) * t.rg;
-    tu[12 * ti + 8] = sp ? packColor(sp.c0) : 0; tu[12 * ti + 9] = sp && sp.c1 ? packColor(sp.c1) : 0;
-    tu[12 * ti + 10] = ((isPDB ? 1 : 0) | (Math.min(t.copies, 0xFFFFFF) << 8)) >>> 0;
-    tf[12 * ti + 11] = isPDB ? 255 : (t.plddt_mean ?? 255);
+    tu[16 * ti + 0] = t.bo; tu[16 * ti + 1] = t.nb; tu[16 * ti + 2] = c0; tu[16 * ti + 3] = c - c0;
+    tu[16 * ti + 4] = t.so; tu[16 * ti + 5] = t.sn;
+    tf[16 * ti + 6] = t.br; tf[16 * ti + 7] = Math.sqrt(5 / 3) * t.rg;
+    tu[16 * ti + 8] = sp ? packColor(sp.c0) : 0; tu[16 * ti + 9] = sp && sp.c1 ? packColor(sp.c1) : 0;
+    tu[16 * ti + 10] = ((isPDB ? 1 : 0) | (Math.min(t.copies, 0xFFFFFF) << 8)) >>> 0;
+    tf[16 * ti + 11] = isPDB ? 255 : (t.plddt_mean ?? 255);
+    const mi = modeIdx[ti];
+    if (mi) { tu[16 * ti + 12] = mi[0]; tu[16 * ti + 13] = mi[1]; tu[16 * ti + 14] = mi[2]; }
   });
   const byId = new Map<string, number>();
   types.forEach((t, i) => byId.set(t.id, i));
-  return { types, beads, st, clusters, typeInfo, nClusters: nC, byId };
+  return { types, beads, st, clusters, typeInfo, modes, modeCap, nClusters: nC, byId };
 }
 
 export interface TileIndex {

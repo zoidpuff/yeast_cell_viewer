@@ -25,7 +25,7 @@ struct U {
   sel: vec4u,             // x selected id, y selected type+1, z shaded(1), w organelle mode
   misc: vec4f,            // x QSTEP, y nucleic bead radius, z outline strength, w dpr
   cell: vec4f,            // x R outer, y R mannan inner, z R PM, w near
-  caps: vec4u,            // x capL0 (offset of L1 items in list01)
+  caps: vec4u,            // x capL0 (offset of L1 items in list01), y motion amount x 1000, z motion cap nm x 1000
 };
 @group(0) @binding(0) var<uniform> u: U;
 
@@ -53,12 +53,13 @@ struct TypeInfo {
   beadOff: u32, beadCount: u32, clusterOff: u32, clusterCount: u32,
   stOff: u32, stCount: u32, br: f32, req: f32,
   color0: u32, color1: u32, flags: u32, plddt: f32,
+  modeOff: u32, coefOff: u32, nConf: u32, pad: u32,   // pool-ensemble motion modes (nConf 0: none)
 };
-struct Inst { t: u32, region: u32, flags: u32, p: vec3f, q: vec4f };
+struct Inst { t: u32, region: u32, flags: u32, p: vec3f, q: vec4f, seed: u32 };
 @group(0) @binding(1) var<storage, read> inst: array<vec4u>;
 @group(0) @binding(2) var<storage, read> pageOrg: array<vec4f>;       // xyz origin (camera-relative is computed), w = bitcast count
 @group(0) @binding(3) var<storage, read> types: array<TypeInfo>;
-@group(0) @binding(4) var<storage, read> typeFlags: array<u32>;       // bit0 highlight, bit1 hidden, bit2 own class
+@group(0) @binding(4) var<storage, read> typeFlags: array<u32>;       // bit0 highlight, bit1 hidden, bit2 own class, bit3 no motion
 
 fn decodeInst(i: u32) -> Inst {
   let w = inst[i];
@@ -78,7 +79,46 @@ fn decodeInst(i: u32) -> Inst {
   else if (qi == 2u) { q4 = vec4f(a, b, big, c); }
   else { q4 = vec4f(a, b, c, big); }
   o.q = vec4f(q4.y, q4.z, q4.w, q4.x);    // -> (x,y,z,w)
+  o.seed = hash32(w.y ^ hash32(w.z ^ hash32(w.w)));   // stable per instance (tile-relative pose bits)
   return o;
+}
+
+// ---- illustrative motion (u.caps.y = amount x 1000; time u.cut.w in s). Not physics: smooth pseudo-random
+// rigid-body wobble per instance plus flexing of low-confidence regions, slowed to about 1 Hz.
+fn rnd(s: u32, k: u32) -> f32 { return f32(hash32(s ^ (k * 0x9E3779B9u)) & 0xFFFFu) / 65535.0; }
+fn wob(s: u32, k: u32, t: f32) -> f32 {          // smooth signal in [-1, 1]
+  return 0.6 * sin(t * (0.5 + rnd(s, k)) + 6.2832 * rnd(s, k + 101u))
+       + 0.4 * sin(t * (1.1 + 1.3 * rnd(s, k + 211u)) + 6.2832 * rnd(s, k + 307u));
+}
+fn qmulq(a: vec4f, b: vec4f) -> vec4f {
+  return vec4f(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
+}
+fn animInst(I: Inst, br: f32) -> Inst {
+  if (u.caps.y == 0u || (typeFlags[I.t] & 8u) != 0u) { return I; }
+  var o = I;
+  let a = f32(u.caps.y) / 1000.0; let t = u.cut.w; let s = I.seed;
+  let sz = max(br, 2.0);
+  var dp = a * 0.35 * sqrt(2.0 / sz) * vec3f(wob(s, 1u, t), wob(s, 2u, t), wob(s, 3u, t));   // nm; larger = slower
+  var ax = normalize(vec3f(wob(s, 4u, 0.3 * t), wob(s, 5u, 0.3 * t), wob(s, 6u, 0.3 * t)) + vec3f(1e-3));
+  if (I.region >= 14u && I.region <= 21u) {       // membrane protein: stay in the bilayer
+    let nrm = qrot(I.q, vec3f(0.0, 0.0, 1.0));
+    dp -= nrm * dot(dp, nrm); ax = nrm;
+  }
+  let h = 0.5 * a * 0.35 / sz * wob(s, 7u, 0.8 * t);  // half-angle: the rim moves about 0.35 nm
+  o.p = I.p + dp;
+  o.q = qmulq(vec4f(ax * sin(h), cos(h)), I.q);
+  return o;
+}
+// per-bead flexing in the molecule frame, spatially coherent (~5 nm wavelength); amplitude from pLDDT
+fn flexBead(b: vec3f, plddt: f32, s: u32) -> vec3f {
+  if (u.caps.y == 0u) { return b; }
+  var amp = 0.04;
+  if (plddt < 254.5) { amp = mix(0.45, 0.04, clamp((plddt - 50.0) / 40.0, 0.0, 1.0)); }
+  let t = u.cut.w * 0.9; let k = 1.25;
+  let d = vec3f(sin(dot(b, vec3f(k, 0.4, -0.3)) + t * (0.8 + rnd(s, 11u)) + 6.2832 * rnd(s, 12u)),
+                sin(dot(b, vec3f(-0.3, k, 0.5)) + t * (0.7 + rnd(s, 13u)) + 6.2832 * rnd(s, 14u)),
+                sin(dot(b, vec3f(0.5, -0.2, k)) + t * (0.9 + rnd(s, 15u)) + 6.2832 * rnd(s, 16u)));
+  return b + (f32(u.caps.y) / 1000.0) * amp * d;
 }
 `;
 
@@ -364,22 +404,49 @@ const DI_HEAD = COMMON + INST + IMPOSTOR + COLOR;
 export const DRAW_L0 = DI_HEAD + /* wgsl */ `
 @group(1) @binding(0) var<storage, read> beads: array<vec4f>;     // xyz, w = bitcast(kind | plddt<<8)
 @group(1) @binding(1) var<storage, read> list01: array<vec2u>;
+@group(1) @binding(2) var<storage, read> modes: array<u32>;      // per bead 4 x (int8 xyz), then f32 conformer paths
+const N_MODES: u32 = 4u;
+fn i8x(w: u32, sh: u32) -> f32 { return f32(bitcast<i32>(w << (24u - sh)) >> 24u); }
+fn coefAt(T: TypeInfo, k: u32, j: u32) -> f32 { return bitcast<f32>(modes[T.coefOff + (k % T.nConf) * N_MODES + j]); }
+// displacement of bead 'local' along the protein's pool-ensemble path: Catmull-Rom through the sampled conformers'
+// mode coefficients, about 2 s per conformer, each instance at its own phase
+fn modeDisp(T: TypeInfo, local: u32, s: u32) -> vec3f {
+  let n = T.nConf;
+  let ph = u.cut.w * 0.5 + rnd(s, 21u) * f32(n);
+  let k = u32(floor(ph)) % n; let f = fract(ph);
+  let f2 = f * f; let f3 = f2 * f;
+  var d = vec3f(0.0);
+  for (var j = 0u; j < N_MODES; j++) {
+    let p0 = coefAt(T, k + n - 1u, j); let p1 = coefAt(T, k, j); let p2 = coefAt(T, k + 1u, j); let p3 = coefAt(T, k + 2u, j);
+    let c = 0.5 * (2.0 * p1 + (p2 - p0) * f + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * f3);
+    let w = modes[T.modeOff + local * N_MODES + j];
+    d += c * vec3f(i8x(w, 0u), i8x(w, 8u), i8x(w, 16u));
+  }
+  let cap = f32(u.caps.z) / 1000.0;     // nm, largest excursion of one bead (modes.json "cap"; 0 = none)
+  let L = length(d);
+  if (cap > 0.0 && L > cap) { d *= cap / L; }
+  return d * f32(u.caps.y) / 1000.0;
+}
 @vertex
 fn vsL0(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
   let item = list01[ii];
   let j = vi / 6u; let corner = vi % 6u;
   let cnt = (item.y >> 22u) + 1u;
   if (j >= cnt) { var o: VOut; o.pos = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
-  let I = decodeInst(item.x);
+  let I0 = decodeInst(item.x); let T = types[I0.t];
+  let I = animInst(I0, T.br);
   let b = beads[(item.y & 0x3FFFFFu) + j];
   let bw = bitcast<u32>(b.w);
   let kind = bw & 255u;
-  let T = types[I.t];
   var r = u.lod.w;
   if (kind == 1u) { r = u.misc.y; }
   let id = ID_INST | item.x;
-  let col = instColor(I, T, kind, f32((bw >> 8u) & 255u), id);
-  return emitQuad(I.p + qrot(I.q, b.xyz), r, corner, col, id);
+  let pl = f32((bw >> 8u) & 255u);
+  let col = instColor(I, T, kind, pl, id);
+  var bp = b.xyz;
+  if (u.caps.y > 0u && T.nConf > 0u) { bp = b.xyz + modeDisp(T, (item.y & 0x3FFFFFu) + j - T.beadOff, I.seed); }
+  else if ((typeFlags[I.t] & 8u) == 0u) { bp = flexBead(b.xyz, select(255.0, pl, kind == 0u), I.seed); }
+  return emitQuad(I.p + qrot(I.q, bp), r, corner, col, id);
 }
 @fragment
 fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
@@ -393,9 +460,9 @@ fn vsL1(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOu
   let j = vi / 6u; let corner = vi % 6u;
   let cnt = (item.y >> 22u) + 1u;
   if (j >= cnt) { var o: VOut; o.pos = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
-  let I = decodeInst(item.x);
+  let I0 = decodeInst(item.x); let T = types[I0.t];
+  let I = animInst(I0, T.br);
   let s = stSpheres[(item.y & 0x3FFFFFu) + j];
-  let T = types[I.t];
   let id = ID_INST | item.x;
   // sphere-tree spheres are padded for collision; shrink slightly for display
   return emitQuad(I.p + qrot(I.q, s.xyz), s.w * 0.9, corner, instColor(I, T, 2u, -1.0, id), id);
@@ -408,8 +475,8 @@ export const DRAW_L2 = DI_HEAD + /* wgsl */ `
 @vertex
 fn vsL2(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
   let i = listL2[ii];
-  let I = decodeInst(i);
-  let T = types[I.t];
+  let I0 = decodeInst(i); let T = types[I0.t];
+  let I = animInst(I0, T.br);
   let id = ID_INST | i;
   return emitQuad(I.p, T.req, vi, instColor(I, T, 2u, -1.0, id), id);
 }
@@ -470,7 +537,15 @@ fn vsFree(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> V
   let col = palette[48u + kind].xyz * (0.94 + 0.12 * hj);
   let slot = spages[i / SPAGE].y;
   let id = ID_FREE | ((slot & 0xFFFu) << 18u) | ((kind & 7u) << 15u) | chain;
-  return emitQuad(rec.xyz - u.eye.xyz, r, vi, col, id);
+  var p = rec.xyz;
+  if (u.caps.y > 0u) {     // illustrative motion: FG repeats and mRNA most, wall polysaccharides and DNA little
+    var amps = array<f32, 6>(0.25, 0.08, 0.06, 0.25, 0.25, 0.5);
+    let amp = amps[min(kind, 5u)] * f32(u.caps.y) / 1000.0;
+    let t = u.cut.w; let ph = 6.2832 * f32(hash32(chain * 2654435761u + kind) & 1023u) / 1023.0;
+    p += amp * vec3f(sin(dot(p, vec3f(0.9, 0.3, -0.2)) + 1.1 * t + ph), sin(dot(p, vec3f(-0.2, 0.9, 0.4)) + 0.9 * t + 2.0 * ph),
+                     sin(dot(p, vec3f(0.3, -0.3, 0.9)) + 1.3 * t + 3.0 * ph));
+  }
+  return emitQuad(p - u.eye.xyz, r, vi, col, id);
 }
 
 @fragment

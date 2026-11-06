@@ -304,6 +304,17 @@ These are generated deterministically from fixed seeds when you zoom in. They ar
   - **Layers:** an inner β-1,3-glucan layer (semi-flexible chains, 0.018 beads/nm³) and an outer mannan layer (branched brushes on the mannoproteins).
   - **Amount:** bead counts are set so the wall is about 20% of cell dry mass.
   - **Collisions:** only partly checked.
+- **Motion (Display → Motion; off by default):** illustrative animation, not molecular dynamics. Nothing is simulated and neighbouring molecules are not checked for collisions while they move.
+  - **Conformational motion from AlphaFold 3 ensembles:**
+    - **Coverage:** 3,692 of the 4,403 single-chain AlphaFold species (54.5% of all placed molecules, 29.7% of the mass).
+    - **Ensembles:** each of these proteins was predicted by AlphaFold 3 in many random multi-protein "pools", about 600 models per protein (in-house predictions, unpublished).
+    - **Fit:** for each protein, 64 pool models are sampled, keeping those with mean pLDDT ≥ 60 over the residues the viewer draws (at least 16). Their Cα atoms are superposed on the library structure, and a principal component analysis gives 4 modes, which capture a median 77% of the variance.
+    - **Playback:** the sampled conformers are ordered into a closed nearest-neighbour path in mode space. Each molecule follows that path at its own phase, about 2 s per conformer, interpolated smoothly between conformers.
+    - **Size:** no amplitude cap. Typical bead excursion is 0.74 nm per protein (median), and floppy termini can swing several nm.
+    - **Skipped proteins:** 707 have too few confident models, and 4 have too few pool models. These get only the generic motion below.
+  - **Limits of the conformational motion:** the modes are linear, so large swings of termini or domains stretch the chain. Along the paths, a median 3.7% of neighbouring Cα–Cα distances leave 0.30–0.46 nm at "On", and 10.6% at "Exaggerated" (2×). Proteins also move independently of their neighbours and can briefly interpenetrate. Motions within complexes, dimers and PDB structures are not represented.
+  - **Generic motion for everything else:** a small rigid-body wobble whose amplitude falls with molecular size (about 0.35 nm translation for small proteins). Membrane proteins move only within the bilayer and rotate only about the membrane normal. Residues with low pLDDT flex by up to 0.45 nm. Free polymers (mRNA, linker DNA, wall polysaccharides, FG repeats) wiggle along their length.
+  - **Static:** actin filaments, microtubules, nuclear pores and nucleosomes stay still, so that their assemblies stay intact.
 
 ## 8. Packing
 
@@ -407,7 +418,7 @@ Together these give about 150–160 mg/mL. The remainder is within the uncertain
 
 | Area | Limitation |
 |---|---|
-| Physics | Static random sequential addition: no interactions, no dynamics, random orientations, and densities below the jamming limit of real cytoplasm. |
+| Physics | Static random sequential addition: no interactions, no dynamics, random orientations, and densities below the jamming limit of real cytoplasm. The optional motion is illustrative (section 7). |
 | Abundances | About 2-fold per-protein uncertainty. The proteome total is probably low. Ribosomes are probably low (169,000 vs about 3 × 10⁵ estimated). Fixed counts for tRNA and mRNA are assumptions. |
 | Geometry | Illustrative layout. Nucleus smaller than in EM. A single mitochondrial reticulum. No bud, so no cell-cycle-dependent structures. |
 | Mitochondria | Matrix only 65% filled; mitochondrially encoded subunits are inferred from their complexes. |
@@ -432,6 +443,7 @@ Together these give about 150–160 mg/mL. The remainder is within the uncertain
 | Complex Portal (EMBL-EBI) | Curated complexes for taxon 559292 | |
 | IntAct | Physical interactions, to decide heterodimer binding | |
 | Alliance of Genome Resources | Paralog pairs | |
+| AlphaFold 3 pool predictions (in-house, unpublished) | Conformational ensembles behind the optional motion | not public |
 
 ### 12.2 Literature behind the parameters
 
@@ -467,7 +479,8 @@ The other complexes and homo-oligomers are listed per species in the viewer's in
 
 ## 13. Reproducibility and data access
 
-- **Pipeline.** The model is built by a Python pipeline (numba-accelerated) in five stages: inventory, geometry, packing, validation and encoding. A full rebuild takes roughly 10–15 minutes on a recent multi-core desktop or laptop, with fixed seeds throughout. The pipeline code is not part of this repository.
+- **Pipeline.** The model is built by a Python pipeline (numba-accelerated) in five stages: inventory, geometry, packing, validation and encoding. A full rebuild takes roughly 10–15 minutes on a recent multi-core desktop or laptop, with fixed seeds throughout. An optional sixth stage fits the motion modes (section 7); it needs the pool predictions, which are not public. The shipped modes are in `data/library/modes.bin`.
+- **Source code.** The pipeline and the viewer source are in `source/`; `source/README.md` explains how to rebuild.
 - **This repository** holds the built viewer and the encoded data.
   - The tiles under `data/tiles/` store every instance as a species index, a position quantised to about 0.0055 nm and an orientation quantised to about 0.004°.
   - The residue-bead library is in `data/library/`.
