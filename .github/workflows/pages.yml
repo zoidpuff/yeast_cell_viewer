@@ -1,6 +1,7 @@
 # Publish the repository root as the GitHub Pages site.
-# Replaces the built-in Pages deploy, whose 10-minute limit is too short when a data rebuild changes most of the
-# ~6,500 files. Repository setting: Pages -> Source -> GitHub Actions.
+# Replaces the built-in Pages deploy, which once timed out after 10 minutes while syncing a data rebuild (~6,500
+# changed files); this workflow deployed the same commit in 3.5 minutes and can be re-run from the Actions tab.
+# Repository setting: Pages -> Source -> GitHub Actions.
 name: Deploy to GitHub Pages
 
 on:
@@ -33,4 +34,4 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
         with:
-          timeout: 2400000   # ms (40 min)
+          timeout: 600000    # ms; 10 min is the maximum deploy-pages allows
