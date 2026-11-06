@@ -28,7 +28,9 @@ input[type=text] { width: 100%; }
 input[type=range] { width: 100%; accent-color: var(--acc); }
 .row { display: flex; gap: 6px; align-items: center; margin: 5px 0; }
 .row > label { flex: 0 0 74px; color: var(--mut); }
-.row > .val { flex: 0 0 58px; text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+.row > .val { flex: 0 0 68px; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+.row > select { flex: 1; width: auto; }
+.row > button.nudge { flex: 0 0 30px; font-size: 14px; line-height: 1; padding: 3px 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
 .seg { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
@@ -36,6 +38,10 @@ input[type=range] { width: 100%; accent-color: var(--acc); }
 .seg button.on { background: var(--acc); color: #111; }
 .chk { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; user-select: none; }
 .chk input { accent-color: var(--acc); margin: 0; }
+#showList .chk .nm { flex: 1; }
+#showList .chk .only { font-size: 10.5px; color: #9a9790; padding: 0 3px; border-radius: 3px; visibility: hidden; }
+#showList .chk:hover .only { visibility: visible; }
+#showList .chk .only:hover { color: var(--acc); background: rgba(255,255,255,0.08); }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.3); flex: 0 0 auto; }
 #results { margin-top: 5px; max-height: 210px; overflow-y: auto; }
 #results div { padding: 4px 6px; border-radius: 5px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; }
@@ -71,6 +77,16 @@ details summary { cursor: pointer; color: var(--mut); margin: 4px 0; }
 .modal .box { width: min(860px, 92vw); max-height: 86vh; overflow-y: auto; padding: 20px 24px; font-size: 13px; line-height: 1.55; position: relative; }
 .modal .box h2 { margin-top: 0; color: var(--acc); font-size: 18px; }
 .modal .box h3 { margin-bottom: 4px; font-size: 14px; }
+.modal .box.doc { width: min(980px, 94vw); max-height: 90vh; }
+.doc h1 { margin-top: 0; color: var(--acc); font-size: 20px; }
+.doc h2 { margin: 22px 0 6px; color: var(--acc); font-size: 16px; }
+.doc h3 { margin: 14px 0 4px; font-size: 13.5px; }
+.doc ul, .doc ol { padding-left: 20px; margin: 4px 0 8px; }
+.doc table { border-collapse: collapse; margin: 6px 0 10px; font-size: 12px; width: 100%; }
+.doc th, .doc td { border-bottom: 1px solid rgba(255,255,255,0.12); padding: 3px 8px 3px 0; text-align: left; vertical-align: top; }
+.doc th { color: var(--mut); font-weight: 600; }
+.doc code { font-size: 11.5px; background: rgba(255,255,255,0.08); padding: 0 3px; border-radius: 3px; }
+.doc a { color: #8fc3ff; }
 .modal .close { position: absolute; right: 14px; top: 10px; background: none; border: none; font-size: 22px; color: var(--mut); }
 #molBox { width: min(1100px, 94vw); height: min(780px, 88vh); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 #molHead { padding: 9px 14px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; border-bottom: 1px solid var(--line); }
@@ -83,7 +99,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
 .keys { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; }
 #toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; font-size: 12.5px; display: none; z-index: 25; }
 </style>
-  <script type="module" crossorigin src="./assets/index-BEISkWqF.js"></script>
+  <script type="module" crossorigin src="./assets/index-CB9DOqlk.js"></script>
 </head>
 <body>
 <canvas id="gpu" tabindex="0"></canvas>
@@ -114,6 +130,14 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
       <button id="followView" class="small" title="Plane follows the camera while you orbit">Follow camera</button>
     </div>
     <div class="row"><label>Position</label><input type="range" id="planeD" min="-2200" max="2200" step="1"><span class="val" id="planeDv"></span></div>
+    <div class="row"><label>Fine step</label>
+      <button id="nudgeBack" class="small nudge" title="Move the plane back one step (hold to repeat)">−</button>
+      <select id="nudgeStep" title="Step for these buttons, Alt+wheel and Alt+, / Alt+.">
+        <option value="0.1">0.1 nm</option><option value="0.25">0.25 nm</option><option value="0.5" selected>0.5 nm</option>
+        <option value="1">1 nm</option><option value="2">2 nm</option><option value="5">5 nm</option>
+        <option value="10">10 nm</option><option value="50">50 nm</option>
+      </select>
+      <button id="nudgeFwd" class="small nudge" title="Move the plane forward one step (hold to repeat)">+</button></div>
     <div class="row"><label>Slab depth</label><input type="range" id="slab" min="0" max="1000" step="1"><span class="val" id="slabv"></span></div>
     <div class="grid2"><button id="sweepBtn" class="small">Sweep through cell</button><button id="flipBtn" class="small">Flip side</button></div>
   </section>
@@ -137,7 +161,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
   </section>
 
   <section>
-    <div class="h">Show</div>
+    <div class="h" style="display:flex;justify-content:space-between;align-items:center">Show <span><button class="small" id="hideAll">Hide all</button> <button class="small" id="showAll">Show all</button></span></div>
     <div class="grid2" id="showList"></div>
     <details><summary>Compartments</summary><div id="regionList"></div></details>
   </section>
@@ -154,6 +178,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
     <button id="shotBtn" class="small">Screenshot (2×)</button>
     <button id="helpBtn" class="small">Controls</button>
     <button id="aboutBtn" class="small">About the model</button>
+    <button id="modelBtn" class="small" title="Full description: data sources, assumptions, design decisions, validation">Model details</button>
   </section>
 </aside>
 <button id="panelToggle" title="Hide/show panel">‹</button>
@@ -176,7 +201,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
     <div><kbd>Wheel</kbd></div><div>Zoom (from whole cell, 5 µm, down to single residues)</div>
     <div><kbd>Cmd</kbd>+<kbd>Wheel</kbd></div><div>Slow zoom</div>
     <div><kbd>Shift</kbd>+<kbd>Wheel</kbd></div><div>Move the cut plane through the cell</div>
-    <div><kbd>Alt</kbd>/<kbd>Option</kbd>+<kbd>Wheel</kbd></div><div>Move the cut plane in fine steps (0.5 nm per notch)</div>
+    <div><kbd>Alt</kbd>/<kbd>Option</kbd>+<kbd>Wheel</kbd></div><div>Move the cut plane in fine steps (one Fine step per notch, 0.5 nm by default)</div>
     <div><kbd>Click</kbd></div><div>Inspect a molecule, lipid leaflet or compartment</div>
     <div><kbd>Double-click</kbd></div><div>Fly to that point</div>
     <div><kbd>W A S D</kbd> <kbd>Q E</kbd></div><div>Fly forward / left / back / right / down / up</div>
@@ -184,7 +209,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
     <div><kbd>C</kbd></div><div>Toggle cut plane</div>
     <div><kbd>V</kbd></div><div>Align cut plane to view</div>
     <div><kbd>[</kbd> <kbd>]</kbd></div><div>Thinner / thicker slab</div>
-    <div><kbd>,</kbd> <kbd>.</kbd></div><div>Move plane backward / forward (with <kbd>Alt</kbd>: 0.5 nm)</div>
+    <div><kbd>,</kbd> <kbd>.</kbd></div><div>Move plane backward / forward (with <kbd>Alt</kbd>: one Fine step)</div>
     <div><kbd>O</kbd></div><div>Molecules / organelles view</div>
     <div><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd></div><div>Guided views</div>
     <div><kbd>T</kbd></div><div>Start / stop tour</div>
@@ -194,6 +219,8 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
 </div></div>
 
 <div id="aboutModal" class="modal"><div class="glass box"><button class="close">×</button><div id="aboutBody"></div></div></div>
+
+<div id="modelModal" class="modal"><div class="glass box doc"><button class="close">×</button><div id="modelBody"></div></div></div>
 
 <div id="loading"><div class="t">Building a yeast cell…</div><div class="pb"><div></div></div><div class="m"></div><div class="err"></div></div>
 

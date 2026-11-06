@@ -1,0 +1,15 @@
+# Python 3.11 (versions used in development)
+numpy==2.2.6        # numba 0.61 requires numpy <= 2.2
+numba==0.61.2
+scipy==1.15.0
+pandas==2.3.1
+pyarrow
+scikit-image==0.25.2
+gemmi==0.7.5
+requests
+matplotlib
+pillow
+playwright          # headless browser tests (then: playwright install chromium)
+scikit-learn        # sphere-tree k-means (structlib)
+joblib
+fast-simplification # organelle mesh decimation (s5)

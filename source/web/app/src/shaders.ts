@@ -1,0 +1,812 @@
+// WGSL shaders for the whole-cell viewer.
+// Conventions: world units = nm. All rendering is camera-relative (eye at origin) for float precision.
+// Reversed-Z infinite perspective (depth 1 = near, 0 = infinitely far). Cut plane s(p) = dot(n,p) - d;
+// content with s >= 0 is kept (camera looks along +n in section views).
+
+export const PAGE = 1024;      // instances per pool page
+export const SPAGE = 4096;     // lipids / free spheres per pool page
+
+const COMMON = /* wgsl */ `
+const PAGE: u32 = ${PAGE}u;
+const SPAGE: u32 = ${SPAGE}u;
+const INV_SQRT2: f32 = 0.70710678;
+struct U {
+  proj: mat4x4f,
+  view: mat4x4f,          // rotation only (camera-relative)
+  invViewProj: mat4x4f,   // camera-relative clip -> world-relative
+  eye: vec4f,             // world eye, w = px per nm at unit view depth
+  plane: vec4f,           // world n.xyz, d
+  planeV: vec4f,          // view-space n.xyz, sEye = dot(n,eye)-d
+  cut: vec4f,             // x enabled, y slab thickness, z fog range, w time
+  lod: vec4f,             // x L0 bead px, y L1 instance px, z min px for free spheres/lipids, w protein bead radius
+  vp: vec4f,              // width, height, 1/w, 1/h
+  frustum: array<vec4f, 6>,  // camera-relative planes, inside: dot(n,p)+w >= 0
+  modes: vec4u,           // x colorMode, y regionMask, z unused, w highlightActive
+  sel: vec4u,             // x selected id, y selected type+1, z shaded(1), w organelle mode
+  misc: vec4f,            // x QSTEP, y nucleic bead radius, z outline strength, w dpr
+  cell: vec4f,            // x R outer, y R mannan inner, z R PM, w near
+  caps: vec4u,            // x capL0 (offset of L1 items in list01)
+};
+@group(0) @binding(0) var<uniform> u: U;
+
+fn sPlaneW(p: vec3f) -> f32 { return dot(u.plane.xyz, p + u.eye.xyz) - u.plane.w; }   // p camera-relative
+
+fn hash32(x0: u32) -> u32 {
+  var x = x0; x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x;
+}
+fn unpackColor(c: u32) -> vec3f {
+  return vec3f(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
+}
+fn qrot(q: vec4f, v: vec3f) -> vec3f {   // q = (x,y,z,w)
+  let t = 2.0 * cross(q.xyz, v);
+  return v + q.w * t + cross(q.xyz, t);
+}
+fn sphereInFrustum(c: vec3f, r: f32) -> bool {
+  for (var k = 0; k < 6; k++) { if (dot(u.frustum[k].xyz, c) + u.frustum[k].w < -r) { return false; } }
+  return true;
+}
+fn i16f(x: u32) -> f32 { return f32(bitcast<i32>(x << 16u) >> 16u) / 32767.0 * INV_SQRT2; }
+`;
+
+const INST = /* wgsl */ `
+struct TypeInfo {
+  beadOff: u32, beadCount: u32, clusterOff: u32, clusterCount: u32,
+  stOff: u32, stCount: u32, br: f32, req: f32,
+  color0: u32, color1: u32, flags: u32, plddt: f32,
+};
+struct Inst { t: u32, region: u32, flags: u32, p: vec3f, q: vec4f };
+@group(0) @binding(1) var<storage, read> inst: array<vec4u>;
+@group(0) @binding(2) var<storage, read> pageOrg: array<vec4f>;       // xyz origin (camera-relative is computed), w = bitcast count
+@group(0) @binding(3) var<storage, read> types: array<TypeInfo>;
+@group(0) @binding(4) var<storage, read> typeFlags: array<u32>;       // bit0 highlight, bit1 hidden, bit2 own class
+
+fn decodeInst(i: u32) -> Inst {
+  let w = inst[i];
+  let org = pageOrg[i / PAGE].xyz;
+  var o: Inst;
+  o.t = w.x & 0x3FFFu;
+  let qi = (w.x >> 14u) & 3u;
+  o.region = (w.x >> 16u) & 31u;
+  o.flags = w.x >> 21u;
+  o.p = org + vec3f(f32(w.y & 0xFFFFu), f32(w.y >> 16u), f32(w.z & 0xFFFFu)) * u.misc.x - u.eye.xyz;
+  let a = i16f(w.z >> 16u); let b = i16f(w.w & 0xFFFFu); let c = i16f(w.w >> 16u);
+  let big = sqrt(max(0.0, 1.0 - a * a - b * b - c * c));
+  // stored order (w,x,y,z) with component qi replaced by 'big'
+  var q4: vec4f;
+  if (qi == 0u) { q4 = vec4f(big, a, b, c); }
+  else if (qi == 1u) { q4 = vec4f(a, big, b, c); }
+  else if (qi == 2u) { q4 = vec4f(a, b, big, c); }
+  else { q4 = vec4f(a, b, c, big); }
+  o.q = vec4f(q4.y, q4.z, q4.w, q4.x);    // -> (x,y,z,w)
+  return o;
+}
+`;
+
+// ---------------------------------------------------------------- culling / LOD compute
+export const CULL = COMMON + INST + /* wgsl */ `
+struct Counters { l0: atomic<u32>, l1: atomic<u32>, l2: atomic<u32>, lip: atomic<u32>, fre: atomic<u32>, ninst: atomic<u32>, p0: u32, p1: u32 };
+struct CullParams { numPages: u32, strideX: u32, capL0: u32, capL1: u32, capL2: u32, capLip: u32, capFree: u32, numSPages: u32 };
+struct Cluster { c: vec4f, info: vec4u };   // centre xyz, radius; bead offset, count
+@group(1) @binding(0) var<storage, read_write> counters: Counters;
+@group(1) @binding(1) var<storage, read_write> list01: array<vec2u>;   // [0,capL0) L0 items, [capL0, capL0+capL1) L1 items
+@group(1) @binding(2) var<storage, read_write> listL2: array<u32>;
+@group(1) @binding(3) var<uniform> cp: CullParams;
+@group(1) @binding(4) var<storage, read> clusters: array<Cluster>;
+
+fn visibleClass(t: TypeInfo, region: u32, tf: u32) -> bool {
+  if ((tf & 2u) != 0u) { return false; }
+  // bit2: molecule classes with their own Show switch (ribosomes, cytoskeleton, ...) ignore the compartment filter
+  if ((tf & 4u) == 0u && ((u.modes.y >> region) & 1u) == 0u) { return false; }
+  return true;
+}
+
+@compute @workgroup_size(64)
+fn cullInstances(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x + gid.y * cp.strideX;
+  let page = i / PAGE;
+  if (page >= cp.numPages) { return; }
+  let cnt = bitcast<u32>(pageOrg[page].w);
+  if ((i % PAGE) >= cnt) { return; }
+  let I = decodeInst(i);
+  let T = types[I.t];
+  if (!visibleClass(T, I.region, typeFlags[I.t])) { return; }
+  let br = T.br;
+  if (u.cut.x > 0.5) {
+    let s = sPlaneW(I.p);
+    if (s < -br || s - br > u.cut.y) { return; }
+  }
+  if (!sphereInFrustum(I.p, br)) { return; }
+  atomicAdd(&counters.ninst, 1u);
+  let dist = max(length(I.p), 0.01);
+  let pxPerNm = u.eye.w / dist;
+  let beadPx = 2.0 * u.lod.w * pxPerNm;
+  if (beadPx >= u.lod.x && T.beadCount > 0u) {
+    for (var c = 0u; c < T.clusterCount; c++) {
+      let CL = clusters[T.clusterOff + c];
+      let cs = CL.c;
+      let cc = I.p + qrot(I.q, cs.xyz);
+      let r = cs.w;
+      if (u.cut.x > 0.5) {
+        let s = sPlaneW(cc);
+        if (s < -r || s - r > u.cut.y) { continue; }
+      }
+      if (!sphereInFrustum(cc, r)) { continue; }
+      let ci = CL.info;
+      let k = atomicAdd(&counters.l0, 1u);
+      if (k < cp.capL0) { list01[k] = vec2u(i, ci.x | ((ci.y - 1u) << 22u)); }
+    }
+  } else if (br * pxPerNm >= u.lod.y && T.stCount > 0u) {
+    let n = T.stCount;
+    var o = 0u;
+    loop {
+      if (o >= n) { break; }
+      let m = min(16u, n - o);
+      let k = atomicAdd(&counters.l1, 1u);
+      if (k < cp.capL1) { list01[cp.capL0 + k] = vec2u(i, (T.stOff + o) | ((m - 1u) << 22u)); }
+      o += 16u;
+    }
+  } else {
+    let k = atomicAdd(&counters.l2, 1u);
+    if (k < cp.capL2) { listL2[k] = i; }
+  }
+}
+`;
+
+// lipids and free spheres culling (separate bind group layout)
+export const CULL_SPHERES = COMMON + /* wgsl */ `
+struct Counters { l0: atomic<u32>, l1: atomic<u32>, l2: atomic<u32>, lip: atomic<u32>, fre: atomic<u32>, ninst: atomic<u32>, p0: u32, p1: u32 };
+struct SParams { numPages: u32, strideX: u32, cap: u32, isLipid: u32 };
+@group(1) @binding(0) var<storage, read_write> counters: Counters;
+@group(1) @binding(1) var<storage, read> spool: array<vec4f>;
+@group(1) @binding(2) var<storage, read> spages: array<vec4u>;      // x count, y tile slot, z visible flag
+@group(1) @binding(3) var<storage, read_write> slist: array<u32>;
+@group(1) @binding(4) var<uniform> sp: SParams;
+
+fn freeRadius(kind: u32) -> f32 {
+  if (kind == 0u) { return 0.6; }   // mRNA nucleotide
+  if (kind == 1u) { return 1.0; }   // linker DNA (2 bp per bead)
+  if (kind == 2u) { return 0.75; }  // beta-glucan triple helix
+  if (kind == 5u) { return 0.45; }  // disordered protein residue (FG repeats)
+  return 0.6;                        // mannan, pre-rRNA
+}
+
+@compute @workgroup_size(64)
+fn cullSpheres(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x + gid.y * sp.strideX;
+  let page = i / SPAGE;
+  if (page >= sp.numPages) { return; }
+  let pg = spages[page];
+  if (pg.z == 0u || (i % SPAGE) >= pg.x) { return; }
+  let rec = spool[i];
+  let p = rec.xyz - u.eye.xyz;
+  var r = 2.6;
+  if (sp.isLipid == 0u) {
+    let kind = bitcast<u32>(rec.w) & 15u;
+    if (((u.modes.z >> kind) & 1u) != 0u) { return; }
+    r = freeRadius(kind);
+  }
+  if (u.cut.x > 0.5) {
+    let s = sPlaneW(p);
+    if (s < -r || s - r > u.cut.y) { return; }
+  }
+  if (!sphereInFrustum(p, r)) { return; }
+  let px = r * u.eye.w / max(length(p), 0.01);
+  if (px < u.lod.z) { return; }
+  if (sp.isLipid == 1u) {
+    let k = atomicAdd(&counters.lip, 1u);
+    if (k < sp.cap) { slist[k] = i; }
+  } else {
+    let k = atomicAdd(&counters.fre, 1u);
+    if (k < sp.cap) { slist[k] = i; }
+  }
+}
+`;
+
+export const FINALIZE = /* wgsl */ `
+struct Counters { l0: u32, l1: u32, l2: u32, lip: u32, fre: u32, ninst: u32, p0: u32, p1: u32 };
+struct Caps { capL0: u32, capL1: u32, capL2: u32, capLip: u32, capFree: u32, a: u32, b: u32, c: u32 };
+@group(0) @binding(0) var<storage, read> counters: Counters;
+@group(0) @binding(1) var<storage, read_write> args: array<u32>;
+@group(0) @binding(2) var<uniform> caps: Caps;
+@compute @workgroup_size(1)
+fn main() {
+  // drawIndirect args: vertexCount, instanceCount, firstVertex, firstInstance
+  args[0] = 384u; args[1] = min(counters.l0, caps.capL0); args[2] = 0u; args[3] = 0u;
+  args[4] = 96u;  args[5] = min(counters.l1, caps.capL1); args[6] = 0u; args[7] = 0u;
+  args[8] = 6u;   args[9] = min(counters.l2, caps.capL2); args[10] = 0u; args[11] = 0u;
+  args[12] = 18u; args[13] = min(counters.lip, caps.capLip); args[14] = 0u; args[15] = 0u;
+  args[16] = 6u;  args[17] = min(counters.fre, caps.capFree); args[18] = 0u; args[19] = 0u;
+}
+`;
+
+// ---------------------------------------------------------------- sphere impostor drawing
+const IMPOSTOR = /* wgsl */ `
+struct VOut {
+  @builtin(position) pos: vec4f,
+  @location(0) vpos: vec3f,
+  @location(1) @interpolate(flat) center: vec3f,
+  @location(2) @interpolate(flat) radius: f32,
+  @location(3) @interpolate(flat) color: vec3f,
+  @location(4) @interpolate(flat) id: u32,
+};
+struct FOut {
+  @location(0) color: vec4f,
+  @location(1) id: u32,
+  @builtin(frag_depth) depth: f32,
+};
+const ID_INST: u32 = 0x40000000u;
+const ID_LIPID: u32 = 0x80000000u;
+const ID_FREE: u32 = 0xC0000000u;
+
+fn emitQuad(cw: vec3f, r: f32, corner: u32, color: vec3f, id: u32) -> VOut {
+  var o: VOut;
+  let cv = (u.view * vec4f(cw, 1.0)).xyz;
+  let d = length(cv);
+  o.center = cv; o.radius = r; o.color = color; o.id = id;
+  if (r <= 0.0 || d <= r * 1.02 || cv.z > -u.cell.w) {
+    o.pos = vec4f(2.0, 2.0, 2.0, 1.0); o.vpos = vec3f(0.0); return o;
+  }
+  let k = d / sqrt(d * d - r * r);
+  var off = vec2f(-1.0, -1.0);
+  if (corner == 1u || corner == 4u) { off = vec2f(1.0, -1.0); }
+  else if (corner == 2u || corner == 3u) { off = vec2f(-1.0, 1.0); }
+  else if (corner == 5u) { off = vec2f(1.0, 1.0); }
+  // billboard perpendicular to the view ray through the centre
+  let fwd = cv / d;
+  var up0 = vec3f(0.0, 1.0, 0.0);
+  if (abs(fwd.y) > 0.99) { up0 = vec3f(1.0, 0.0, 0.0); }
+  let right = normalize(cross(fwd, up0));
+  let up = cross(right, fwd);
+  let vp = cv + (right * off.x + up * off.y) * r * k * 1.05;
+  o.vpos = vp;
+  o.pos = u.proj * vec4f(vp, 1.0);
+  return o;
+}
+
+fn shadeFrag(in: VOut) -> FOut {
+  var o: FOut;
+  let rd = normalize(in.vpos);
+  let b = dot(rd, in.center);
+  let c = dot(in.center, in.center) - in.radius * in.radius;
+  var h = b * b - c;
+  if (h < 0.0) { discard; }
+  h = sqrt(h);
+  var t = b - h;
+  let t1 = b + h;
+  var nrm = (rd * t - in.center) / in.radius;
+  var cap = false;
+  if (u.cut.x > 0.5) {
+    let dn = dot(u.planeV.xyz, rd);
+    let s0 = u.planeV.w + t * dn;
+    if (s0 < 0.0) {
+      if (dn <= 0.0) { discard; }
+      let tp = -u.planeV.w / dn;
+      if (tp > t1) { discard; }
+      t = tp; nrm = -u.planeV.xyz; cap = true;
+    }
+    if (u.planeV.w + t * dn > u.cut.y) { discard; }
+  }
+  if (t < u.cell.w) { discard; }
+  let p = rd * t;
+  let clip = u.proj * vec4f(p, 1.0);
+  o.depth = clip.z / clip.w;
+  var shade = 1.0;
+  if (u.sel.z == 1u) {
+    let l = normalize(vec3f(0.35, 0.45, 1.0));
+    shade = 0.45 + 0.55 * max(dot(nrm, l), 0.0) + 0.12 * pow(max(nrm.z, 0.0), 8.0);
+  } else {
+    shade = 0.93 + 0.07 * max(nrm.z, 0.0);
+  }
+  if (cap) { shade = 0.9; }
+  o.color = vec4f(in.color * shade, 1.0);
+  o.id = in.id;
+  return o;
+}
+`;
+
+const COLOR = /* wgsl */ `
+@group(0) @binding(5) var<storage, read> palette: array<vec4f>;   // 0..31 region colours, 32.. special
+
+fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
+  let k = vec3f(1.0, 2.0 / 3.0, 1.0 / 3.0);
+  let p = abs(fract(vec3f(h) + k) * 6.0 - 3.0);
+  return v * mix(vec3f(1.0), clamp(p - 1.0, vec3f(0.0), vec3f(1.0)), s);
+}
+fn viridis(t0: f32) -> vec3f {
+  let t = clamp(t0, 0.0, 1.0);
+  let c0 = vec3f(0.2777, 0.0054, 0.3340); let c1 = vec3f(0.1050, 1.4046, 1.3846);
+  let c2 = vec3f(-0.3308, 0.2148, 0.0950); let c3 = vec3f(-4.6342, -5.7991, -19.3324);
+  let c4 = vec3f(6.2282, 14.1799, 56.6906); let c5 = vec3f(4.7763, -13.7451, -65.3530);
+  let c6 = vec3f(-5.4355, 4.6459, 26.3124);
+  return c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6)))));
+}
+fn plddtColor(p: f32) -> vec3f {
+  if (p > 90.0) { return vec3f(0.0, 0.325, 0.839); }
+  if (p > 70.0) { return vec3f(0.396, 0.796, 0.953); }
+  if (p > 50.0) { return vec3f(1.0, 0.859, 0.075); }
+  return vec3f(1.0, 0.490, 0.271);
+}
+// kind: 0 protein bead, 1 nucleic-acid bead, 2 coarse (sphere tree / single sphere)
+fn instColor(I: Inst, T: TypeInfo, kind: u32, plddt: f32, id: u32) -> vec3f {
+  let mode = u.modes.x;
+  let hj = f32(hash32(I.t * 2654435761u + 17u) & 1023u) / 1023.0;
+  var c: vec3f;
+  if (mode == 0u) {          // Goodsell compartment palette with per-type lightness jitter
+    if (T.color0 != 0u) {
+      c = unpackColor(T.color0);
+      if (kind == 1u && T.color1 != 0u) { c = unpackColor(T.color1); }
+    } else { c = palette[I.region].xyz; }
+    c = c * (0.93 + 0.14 * hj);
+  } else if (mode == 1u) {   // structure source
+    if ((T.flags & 1u) != 0u) { c = vec3f(0.30, 0.55, 0.85); } else { c = vec3f(0.96, 0.66, 0.30); }
+    if (kind == 1u) { c = c * 0.8; }
+  } else if (mode == 2u) {   // pLDDT
+    var p = plddt;
+    if (kind == 2u) { p = T.plddt; }
+    if (p > 100.5 || p < 0.0) { c = vec3f(0.72, 0.72, 0.72); } else { c = plddtColor(p); }
+  } else if (mode == 3u) {   // abundance (log10 copies, 1 .. 1e6)
+    c = viridis(log(max(f32(T.flags >> 8u), 1.0)) / log(10.0) / 6.0);
+  } else if (mode == 4u) {   // random per type
+    c = hsv2rgb(hj, 0.55, 0.92);
+  } else {                    // compartment only
+    c = palette[I.region].xyz;
+  }
+  if (u.modes.w == 1u && (typeFlags[I.t] & 1u) == 0u) {
+    let g = dot(c, vec3f(0.3, 0.59, 0.11));
+    c = mix(vec3f(g), vec3f(0.93), 0.72);
+  }
+  if (u.sel.x == id && id != 0u) { c = mix(c, vec3f(1.0, 0.92, 0.2), 0.55); }
+  return c;
+}
+`;
+
+const DI_HEAD = COMMON + INST + IMPOSTOR + COLOR;
+export const DRAW_L0 = DI_HEAD + /* wgsl */ `
+@group(1) @binding(0) var<storage, read> beads: array<vec4f>;     // xyz, w = bitcast(kind | plddt<<8)
+@group(1) @binding(1) var<storage, read> list01: array<vec2u>;
+@vertex
+fn vsL0(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let item = list01[ii];
+  let j = vi / 6u; let corner = vi % 6u;
+  let cnt = (item.y >> 22u) + 1u;
+  if (j >= cnt) { var o: VOut; o.pos = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  let I = decodeInst(item.x);
+  let b = beads[(item.y & 0x3FFFFFu) + j];
+  let bw = bitcast<u32>(b.w);
+  let kind = bw & 255u;
+  let T = types[I.t];
+  var r = u.lod.w;
+  if (kind == 1u) { r = u.misc.y; }
+  let id = ID_INST | item.x;
+  let col = instColor(I, T, kind, f32((bw >> 8u) & 255u), id);
+  return emitQuad(I.p + qrot(I.q, b.xyz), r, corner, col, id);
+}
+@fragment
+fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
+`;
+export const DRAW_L1 = DI_HEAD + /* wgsl */ `
+@group(1) @binding(0) var<storage, read> stSpheres: array<vec4f>; // xyz r
+@group(1) @binding(1) var<storage, read> list01: array<vec2u>;
+@vertex
+fn vsL1(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let item = list01[u.caps.x + ii];
+  let j = vi / 6u; let corner = vi % 6u;
+  let cnt = (item.y >> 22u) + 1u;
+  if (j >= cnt) { var o: VOut; o.pos = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  let I = decodeInst(item.x);
+  let s = stSpheres[(item.y & 0x3FFFFFu) + j];
+  let T = types[I.t];
+  let id = ID_INST | item.x;
+  // sphere-tree spheres are padded for collision; shrink slightly for display
+  return emitQuad(I.p + qrot(I.q, s.xyz), s.w * 0.9, corner, instColor(I, T, 2u, -1.0, id), id);
+}
+@fragment
+fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
+`;
+export const DRAW_L2 = DI_HEAD + /* wgsl */ `
+@group(1) @binding(0) var<storage, read> listL2: array<u32>;
+@vertex
+fn vsL2(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let i = listL2[ii];
+  let I = decodeInst(i);
+  let T = types[I.t];
+  let id = ID_INST | i;
+  return emitQuad(I.p, T.req, vi, instColor(I, T, 2u, -1.0, id), id);
+}
+@fragment
+fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
+`;
+
+export const DRAW_SPHERES = COMMON + IMPOSTOR + /* wgsl */ `
+@group(1) @binding(0) var<storage, read> spool: array<vec4f>;
+@group(1) @binding(1) var<storage, read> spages: array<vec4u>;
+@group(1) @binding(2) var<storage, read> slist: array<u32>;
+@group(0) @binding(5) var<storage, read> palette: array<vec4f>;
+
+fn octDecode(e: vec2f) -> vec3f {
+  var v = vec3f(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  if (v.z < 0.0) { let xy = (1.0 - abs(v.yx)) * select(vec2f(-1.0), vec2f(1.0), v.xy >= vec2f(0.0)); v = vec3f(xy, v.z); }
+  return normalize(v);
+}
+
+// lipid record: xyz = midsurface point, w = bits: oct normal (8+8), class (3) <<16, leaflet sign <<19, membrane (4) <<20
+@vertex
+fn vsLipid(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let i = slist[ii];
+  let rec = spool[i];
+  let w = bitcast<u32>(rec.w);
+  let n0 = octDecode(vec2f(f32(w & 255u), f32((w >> 8u) & 255u)) / 127.5 - 1.0);
+  let cls = (w >> 16u) & 7u;
+  let sgn = select(-1.0, 1.0, ((w >> 19u) & 1u) == 1u);
+  let mem = (w >> 20u) & 15u;
+  let j = vi / 6u; let corner = vi % 6u;
+  var off = 1.95; var r = 0.55;
+  var col = palette[40u].xyz;                  // head
+  if (cls == 5u) {                              // ergosterol: two beads, rigid ring system
+    col = palette[42u].xyz;
+    if (j == 0u) { off = 1.55; r = 0.45; } else if (j == 1u) { off = 0.75; r = 0.45; } else { r = 0.0; }
+  } else {
+    col = palette[32u + cls].xyz;
+    if (j == 1u) { off = 1.25; r = 0.45; col = palette[41u].xyz; }
+    else if (j == 2u) { off = 0.55; r = 0.45; col = palette[41u].xyz; }
+  }
+  let slot = spages[i / SPAGE].y;
+  let id = ID_LIPID | (slot << 5u) | (mem << 1u) | select(0u, 1u, sgn > 0.0);
+  let p = rec.xyz - u.eye.xyz + n0 * sgn * off;
+  return emitQuad(p, r, corner, col, id);
+}
+
+// free sphere record: xyz, w = bits: kind (4) | chain (15) << 4
+@vertex
+fn vsFree(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let i = slist[ii];
+  let rec = spool[i];
+  let w = bitcast<u32>(rec.w);
+  let kind = w & 15u;
+  let chain = (w >> 4u) & 0x7FFFu;
+  var r = 0.6;
+  if (kind == 1u) { r = 1.0; } else if (kind == 2u) { r = 0.75; } else if (kind == 5u) { r = 0.45; }
+  let hj = f32(hash32(chain * 747796405u + kind) & 255u) / 255.0;
+  let col = palette[48u + kind].xyz * (0.94 + 0.12 * hj);
+  let slot = spages[i / SPAGE].y;
+  let id = ID_FREE | ((slot & 0xFFFu) << 18u) | ((kind & 7u) << 15u) | chain;
+  return emitQuad(rec.xyz - u.eye.xyz, r, vi, col, id);
+}
+
+@fragment
+fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
+`;
+
+// ---------------------------------------------------------------- membrane meshes (per tile, or organelle overview)
+export const DRAW_MESH = COMMON + /* wgsl */ `
+@group(0) @binding(5) var<storage, read> palette: array<vec4f>;
+struct MP { slot: u32, organelle: u32, offset0: f32, offset1: f32 };
+@group(1) @binding(0) var<uniform> mp: MP;
+struct VOut {
+  @builtin(position) pos: vec4f,
+  @location(0) prel: vec3f,
+  @location(1) nrm: vec3f,
+  @location(2) @interpolate(flat) mem: u32,
+  @location(3) @interpolate(flat) leaf: u32,
+};
+@vertex
+fn vsMesh(@location(0) p: vec4f, @location(1) n: vec4f, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut;
+  let mem = bitcast<u32>(p.w);
+  var off = select(mp.offset0, mp.offset1, ii == 1u);
+  if (mem == 8u) { off = select(-0.8, 0.8, ii == 1u); }   // lipid droplet monolayer
+  let pr = p.xyz + n.xyz * off - u.eye.xyz;
+  o.prel = pr; o.nrm = n.xyz; o.mem = mem; o.leaf = ii;
+  o.pos = u.proj * (u.view * vec4f(pr, 1.0));
+  return o;
+}
+struct FOut { @location(0) color: vec4f, @location(1) id: u32 };
+@fragment
+fn fsMesh(in: VOut, @builtin(front_facing) ff: bool) -> FOut {
+  var o: FOut;
+  if (u.cut.x > 0.5) {
+    let s = sPlaneW(in.prel);
+    if (s < 0.0 || (mp.organelle != 1u && s > u.cut.y)) { discard; }
+  }
+  let vn = normalize((u.view * vec4f(in.nrm, 0.0)).xyz);
+  var c = palette[40u].xyz;
+  if (mp.organelle == 1u) { c = palette[56u + in.mem].xyz; } else if (mp.organelle == 2u) { c = palette[41u].xyz; }
+  let l = abs(vn.z);
+  var shade = 0.82 + 0.18 * l;
+  if (mp.organelle == 1u) { shade = 0.55 + 0.45 * l; if (!ff) { shade *= 0.8; } }
+  o.color = vec4f(c * shade, 1.0);
+  o.id = 0x80000000u | (mp.slot << 5u) | (in.mem << 1u) | in.leaf;
+  return o;
+}
+`;
+
+// ---------------------------------------------------------------- exact compartment fill (analytic SDFs)
+export const FILL = COMMON + /* wgsl */ `
+@group(0) @binding(5) var<storage, read> palette: array<vec4f>;
+struct Prim { q0: vec4f, q1: vec4f, tc: vec4u };      // type, class
+struct Geo { G0: vec4f, G1: vec4f, G2: vec4f, consts: vec4f, grid: vec4f };   // consts: PORE_R, PERI_W, IMS_W, nPores
+@group(1) @binding(0) var<storage, read> prims: array<Prim>;
+@group(1) @binding(1) var<storage, read> pores: array<vec4f>;
+@group(1) @binding(2) var<storage, read> gridOff: array<u32>;   // prim list offsets (n^3+1) then pore list offsets
+@group(1) @binding(3) var<storage, read> gridIdx: array<u32>;
+@group(1) @binding(4) var<uniform> geo: Geo;
+@group(1) @binding(5) var<storage, read> tileState: array<u32>;   // 22^3, bit0 = molecules loaded
+
+const NMEM: u32 = 10u;
+fn sdfPrim(p: vec3f, pr: Prim) -> f32 {
+  let t = pr.tc.x; let q0 = pr.q0; let q1 = pr.q1;
+  if (t == 0u) { return length(p - q0.xyz) - q0.w; }
+  if (t == 1u) {
+    let a = p - q0.xyz; let b = vec3f(q0.w, q1.x, q1.y) - q0.xyz;
+    let h = clamp(dot(a, b) / dot(b, b), 0.0, 1.0);
+    return length(a - b * h) - q1.z;
+  }
+  if (t == 2u) {
+    let v = p - q0.xyz; let nn = vec3f(q0.w, q1.x, q1.y);
+    let z = dot(v, nn); let rho = length(v - z * nn);
+    let s = max(rho - q1.z, 0.0);
+    return sqrt(s * s + z * z) - q1.w;
+  }
+  let r = length(p);
+  let c = clamp(dot(p, q0.xyz) / max(r, 1e-9), -1.0, 1.0);
+  let th = acos(c);
+  let s = max(th - q1.x, 0.0) * r;
+  let dr = r - q1.y;
+  return sqrt(s * s + dr * dr) - q1.z;
+}
+struct Mem { d: array<f32, 10>, matrix: f32, cell: u32 };
+fn gridCell(p: vec3f) -> u32 {
+  let n = u32(geo.grid.x); let ext = geo.grid.y; let h = 2.0 * ext / f32(n);
+  let g = clamp(vec3i(floor((p + vec3f(ext)) / h)), vec3i(0), vec3i(i32(n) - 1));
+  return (u32(g.x) * n + u32(g.y)) * n + u32(g.z);
+}
+fn memSdfs(p: vec3f) -> Mem {
+  var m: Mem;
+  let G = geo;
+  let PERI = G.consts.y; let PORE_R = G.consts.x;
+  let r = length(p);
+  m.d[0] = G.G0.z - r;     // PM
+  m.d[9] = G.G0.x - r;     // outer
+  let v = p - vec3f(G.G0.w, G.G1.x, G.G1.y);
+  let dn = length(v);
+  let hp = dn - (G.G1.z - 0.5 * PERI);
+  var d = abs(hp) - 0.5 * PERI;
+  let rc = PORE_R + 0.5 * PERI;
+  let cell = gridCell(p); m.cell = cell;
+  let n3 = u32(geo.grid.x * geo.grid.x * geo.grid.x);
+  let po0 = gridOff[n3 + 1u + cell]; let po1 = gridOff[n3 + 1u + cell + 1u];
+  for (var k = po0; k < po1; k++) {
+    let pd = pores[gridIdx[k]].xyz;
+    let z = dot(v, pd);
+    if (z <= 0.0) { continue; }
+    let rho = length(v - z * pd);
+    if (rho < rc) { d = sqrt((rho - rc) * (rho - rc) + hp * hp) - 0.5 * PERI; break; }
+  }
+  m.d[2] = d;
+  m.d[1] = 1e9; m.d[3] = 1e9; m.d[4] = 1e9; m.d[6] = 1e9; m.d[7] = 1e9; m.d[8] = 1e9;
+  var im = 1e9; var cr = 1e9;
+  let o0 = gridOff[cell]; let o1 = gridOff[cell + 1u];
+  for (var k = o0; k < o1; k++) {
+    let pr = prims[gridIdx[k]];
+    let dd = sdfPrim(p, pr);
+    let c = pr.tc.y;
+    if (c == 7u) { m.d[1] = min(m.d[1], dd); }
+    else if (c == 0u) { m.d[3] = min(m.d[3], dd); }
+    else if (c == 4u) { m.d[4] = min(m.d[4], dd); }
+    else if (c == 5u) { im = min(im, dd); }
+    else if (c == 6u) { cr = min(cr, dd); }
+    else if (c == 2u) { m.d[6] = min(m.d[6], dd); }
+    else if (c == 3u) { m.d[7] = min(m.d[7], dd); }
+    else if (c == 1u) { m.d[8] = min(m.d[8], dd); }
+  }
+  m.matrix = max(im, -cr);
+  m.d[5] = -m.matrix;
+  return m;
+}
+// labels: 0 EXT,1 MANNAN,2 GLUCAN,3 CYTO,4 CER,5 PERI,6 NUCP,7 NUCL,8 VAC,9 IMS,10 MATRIX,11 LD,12 GOLGI,13 PEROX,14 PORE
+fn labelOf(p: vec3f, m: Mem) -> u32 {
+  let G = geo; let PERI = G.consts.y; let PORE_R = G.consts.x;
+  let r = length(p);
+  if (r > G.G0.x) { return 0u; }
+  if (r > G.G0.y) { return 1u; }
+  if (r > G.G0.z) { return 2u; }
+  if (m.d[1] < 0.0) { return 4u; }
+  if (m.d[2] < 0.0) { return 5u; }
+  let v = p - vec3f(G.G0.w, G.G1.x, G.G1.y);
+  let dn = length(v);
+  if (dn < G.G1.z - 0.5 * PERI) {
+    let hp = dn - (G.G1.z - 0.5 * PERI);
+    let rc = PORE_R + 0.5 * PERI;
+    if (hp > -0.5 * PERI - 8.0) {
+      let n3 = u32(geo.grid.x * geo.grid.x * geo.grid.x);
+      let po0 = gridOff[n3 + 1u + m.cell]; let po1 = gridOff[n3 + 1u + m.cell + 1u];
+      for (var k = po0; k < po1; k++) {
+        let pd = pores[gridIdx[k]].xyz;
+        let z = dot(v, pd);
+        if (z <= 0.0) { continue; }
+        let rr = v - z * pd;
+        if (dot(rr, rr) < rc * rc) { return 14u; }
+      }
+    }
+    let w = p - vec3f(G.G1.w, G.G2.x, G.G2.y);
+    if (dn < G.G1.z - PERI && dot(w, w) < G.G2.z * G.G2.z) { return 7u; }
+    return 6u;
+  }
+  if (dn < G.G1.z) { return 14u; }
+  if (m.d[4] < 0.0) { if (m.matrix < 0.0) { return 10u; } return 9u; }
+  if (m.d[3] < 0.0) { return 8u; }
+  if (m.d[8] < 0.0) { return 11u; }
+  if (m.d[6] < 0.0) { return 12u; }
+  if (m.d[7] < 0.0) { return 13u; }
+  return 3u;
+}
+fn tileLoaded(p: vec3f) -> bool {
+  let g = vec3i(floor(p / 200.0)) + vec3i(11);
+  if (any(g < vec3i(0)) || any(g > vec3i(21))) { return false; }
+  return (tileState[(u32(g.x) * 22u + u32(g.y)) * 22u + u32(g.z)] & 1u) != 0u;
+}
+
+struct VO { @builtin(position) pos: vec4f, @location(0) ndc: vec2f };
+@vertex
+fn vsFill(@builtin(vertex_index) vi: u32) -> VO {
+  var o: VO;
+  let xy = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  o.pos = vec4f(xy, 0.0, 1.0); o.ndc = xy;
+  return o;
+}
+struct FOut { @location(0) color: vec4f, @location(1) id: u32, @builtin(frag_depth) depth: f32 };
+
+fn shadeLabel(p: vec3f, o: ptr<function, FOut>, bands: bool) {
+  let m = memSdfs(p);
+  let lab = labelOf(p, m);
+  var c = palette[80u + lab].xyz;
+  var id = 0x100u + lab;
+  if (bands) {
+    for (var k = 0u; k < 9u; k++) {
+      let d = m.d[k];
+      if (k == 8u) {           // lipid droplet: phospholipid monolayer on the outside of the neutral-lipid core
+        if (d > -2.0 && d < 0.0) { c = select(palette[41u].xyz, palette[40u].xyz, d > -0.9); id = 0x200u + k; }
+        continue;
+      }
+      let a = abs(d);
+      if (a < 2.5) { c = select(palette[41u].xyz, palette[40u].xyz, a > 1.35); id = 0x200u + k; }
+    }
+  }
+  (*o).color = vec4f(c, 1.0);
+  (*o).id = id;
+}
+
+@fragment
+fn fsFill(in: VO) -> FOut {
+  var o: FOut;
+  let pw = u.invViewProj * vec4f(in.ndc, 1.0, 1.0);    // near plane point (camera-relative)
+  let rd = normalize(pw.xyz / pw.w);
+  let eye = u.eye.xyz;
+  let R = u.cell.x;
+  // ray vs outer cell sphere (centre at origin in world)
+  let b = dot(rd, eye);
+  let c = dot(eye, eye) - R * R;
+  let h = b * b - c;
+  o.color = vec4f(palette[80u].xyz, 1.0); o.id = 0u; o.depth = 0.0;
+  if (h < 0.0) { return o; }
+  let sh = sqrt(h);
+  var t0 = max(-b - sh, 0.0);
+  let t1 = -b + sh;
+  if (t1 <= 0.0) { return o; }
+  var onCut = false;
+  if (u.cut.x > 0.5) {
+    let dn = dot(u.plane.xyz, rd);
+    let sE = u.planeV.w;
+    if (abs(dn) < 1e-6) { if (sE < 0.0) { return o; } }
+    else {
+      let tp = -sE / dn;
+      if (dn > 0.0) { if (tp > t1) { return o; } if (tp > t0) { t0 = tp; onCut = true; } }
+      else { if (tp < t0) { return o; } }
+    }
+    if (u.sel.w == 1u) {
+      // organelle mode: cut face only (meshes provide the rest)
+      if (!onCut) { o.color = vec4f(palette[80u].xyz, 1.0); return o; }
+    }
+  } else if (u.sel.w == 0u) {
+    if (c < 0.0) { return o; }      // camera inside the cell without a cut: nothing analytic to show
+  }
+  var t = t0 + select(0.5, 0.0, onCut);
+  var p = eye + rd * t;
+  var bands = true;
+  if (u.sel.w == 0u && tileLoaded(p)) {
+    // molecules are drawn here: show the compartment backdrop behind the visible slab
+    if (onCut) { t = t + u.cut.y / max(dot(u.plane.xyz, rd), 0.05); }
+    else { t = t + 140.0; }
+    if (t >= t1) { o.color = vec4f(palette[80u].xyz, 1.0); return o; }
+    p = eye + rd * t;
+  }
+  shadeLabel(p, &o, bands);
+  let pv = (u.view * vec4f(rd * t, 1.0)).xyz;
+  let clip = u.proj * vec4f(pv, 1.0);
+  o.depth = clamp(clip.z / clip.w, 0.0, 1.0);
+  if (!onCut && u.cut.x < 0.5) {
+    // outer surface: gentle sphere shading
+    let nn = normalize(p);
+    let vn = (u.view * vec4f(nn, 0.0)).xyz;
+    o.color = vec4f(o.color.xyz * (0.75 + 0.25 * max(vn.z, 0.0)), 1.0);
+  }
+  return o;
+}
+`;
+
+// ---------------------------------------------------------------- pick (id + depth of one pixel)
+// WebGPU only copies whole depth subresources to buffers, so a single texel is read here instead.
+export const PICK = /* wgsl */ `
+@group(0) @binding(0) var idTex: texture_2d<u32>;
+@group(0) @binding(1) var depthTex: texture_depth_2d;
+@group(0) @binding(2) var<uniform> px: vec4u;
+@group(0) @binding(3) var<storage, read_write> outp: array<u32, 4>;
+@compute @workgroup_size(1)
+fn main() {
+  let p = vec2i(px.xy);
+  outp[0] = textureLoad(idTex, p, 0).x;
+  outp[1] = bitcast<u32>(textureLoad(depthTex, p, 0));
+}
+`;
+
+// ---------------------------------------------------------------- composite (outlines, depth cueing)
+export const COMPOSITE = COMMON + /* wgsl */ `
+@group(1) @binding(0) var colorTex: texture_2d<f32>;
+@group(1) @binding(1) var idTex: texture_2d<u32>;
+@group(1) @binding(2) var depthTex: texture_depth_2d;
+struct VO { @builtin(position) pos: vec4f };
+@vertex
+fn vsFull(@builtin(vertex_index) vi: u32) -> VO {
+  var o: VO;
+  let xy = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  o.pos = vec4f(xy, 0.0, 1.0);
+  return o;
+}
+fn viewPos(px: vec2i, d: f32) -> vec3f {
+  let ndc = vec2f((f32(px.x) + 0.5) * u.vp.z * 2.0 - 1.0, 1.0 - (f32(px.y) + 0.5) * u.vp.w * 2.0);
+  let w = u.invViewProj * vec4f(ndc, max(d, 1e-7), 1.0);
+  return w.xyz / w.w;
+}
+@fragment
+fn fsComposite(in: VO) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  let dims = vec2i(textureDimensions(colorTex));
+  var c = textureLoad(colorTex, px, 0).xyz;
+  let id = textureLoad(idTex, px, 0).x;
+  let d = textureLoad(depthTex, px, 0);
+  let cat = id >> 30u;
+  if (d <= 0.0) { return vec4f(c, 1.0); }
+  let prel = viewPos(px, d);
+  let dist = length(prel);
+  let pxPerNm = u.eye.w / max(dist, 1e-3);
+  // depth cue behind the cut face (Goodsell-style darkening with depth)
+  if (u.cut.x > 0.5 && cat != 0u && u.sel.w == 0u) {
+    let s = sPlaneW(prel);
+    let f = smoothstep(0.0, u.cut.z, s);
+    c = mix(c, c * vec3f(0.55, 0.56, 0.62), f * 0.8);
+  }
+  // outlines at molecule (id) boundaries; strength fades when molecules are only a few pixels wide
+  let rad = i32(max(1.0, round(u.misc.w)));
+  var edge = 0.0;
+  var selEdge = 0.0;
+  let offs = array<vec2i, 4>(vec2i(rad, 0), vec2i(-rad, 0), vec2i(0, rad), vec2i(0, -rad));
+  for (var k = 0; k < 4; k++) {
+    let q = clamp(px + offs[k], vec2i(0), dims - vec2i(1));
+    let id2 = textureLoad(idTex, q, 0).x;
+    if (id2 != id) {
+      let d2 = textureLoad(depthTex, q, 0);
+      if (cat == 0u) { if ((id2 >> 30u) == 0u) { edge = 1.0; } }
+      else if (d2 <= d * 1.0005 || (id2 >> 30u) == 0u) { edge = 1.0; }
+      if (u.sel.x != 0u && (id2 == u.sel.x || id == u.sel.x)) { selEdge = 1.0; }
+    }
+  }
+  var strength = u.misc.z;
+  if (cat == 1u) { strength *= smoothstep(0.6, 2.5, pxPerNm); }
+  else if (cat == 2u) { strength *= 0.55 * smoothstep(1.5, 6.0, pxPerNm); }
+  else if (cat == 3u) { strength *= 0.7 * smoothstep(1.5, 5.0, pxPerNm); }
+  else { strength *= 0.35; }
+  c = mix(c, c * 0.18, edge * strength);
+  if (selEdge > 0.0) { c = vec3f(1.0, 0.85, 0.1); }
+  return vec4f(c, 1.0);
+}
+`;
