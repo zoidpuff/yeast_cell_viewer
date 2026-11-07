@@ -99,12 +99,15 @@ def place(cell, lp, n_target, seed=23, obstacles=None, log=print):
         th0 = rng.uniform(0, 2 * np.pi)
         for dr, dl in offs:
             R_ = Rc + dr; nsub = int(CABLE_LENGTH / prm["rise"]); spin = rng.uniform(0, 2 * np.pi)
+            shaped = c3.n_fields(G) > c3.F_CELL
             mine = []        # subunits of this filament touch each other: insert them only once the filament is done
             for k in range(nsub):
                 attempts += 1
                 s = k * prm["rise"]; th = th0 + s / R_
                 radial = np.cos(th) * e1 + np.sin(th) * e2
                 tang = -np.sin(th) * e1 + np.cos(th) * e2
+                if shaped:    # follow the real outline at the same depth below the plasma membrane
+                    R_ = c3.ray_depth(G, radial, G[0] - G[2] + CABLE_DEPTH - dr)
                 F = np.c_[radial, np.cross(tang, radial), tang]            # x radial, z along the cable
                 Rk = F @ _rz(spin + np.radians(prm["phi_deg"]) * k)
                 centre = R_ * radial + dl * n + Rk @ np.array([prm["r0"], 0.0, 0.0])

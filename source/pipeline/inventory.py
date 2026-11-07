@@ -12,7 +12,12 @@ TOTAL_PROTEINS = 4.2e7  # Ho et al. 2018 unified total (molecules/cell)
 # ---------------- geometry (literature-anchored; see report) ----------------
 CELL_VOL = 42.0          # um^3, mean log-phase cell volume (Jorgensen 2002, as used by Ho 2018)
 WALL_THICK = 0.11        # um, lower bound of 110-200 nm (Orlean 2012)
-FRAC = dict(nucleus=0.07, vacuole=0.07, mitochondrion=0.02, lipid_droplet=0.01)  # Uchida 2011 SXT; mito raised 1%->2% (assumption: SXT under-segments thin tubules; proteome-implied density otherwise ~480 mg/mL)
+FRAC = dict(nucleus=0.08, vacuole=0.09, mitochondrion=0.02, lipid_droplet=0.005)
+# nucleus 8%: two segmented cryo-FIB/SEM nuclei (8.0%, 9.7%; organelle_stats.json), between fluorescence (~7%,
+#   Jorgensen 2007) and serial-section EM (10.5%, Yamaguchi 2011)
+# vacuole 9% and lipid droplets 0.5%: medians of five segmented cells (vacuoles 6-13%, a lower bound; droplets
+#   0.3-0.8%, depositor labels); SXT gave 7% and 1% (Uchida 2011)
+# mitochondria raised 1% -> 2% (assumption: SXT under-segments thin tubules; proteome-implied density otherwise ~480 mg/mL)
 NUCLEOLUS_OF_NUC = 0.20  # Uchida 2011
 ENDOMEMBRANE_FRAC = 0.01 # assumption: Golgi+endosomes+peroxisomes (not segmented by SXT)
 CER_COVER = 0.48         # fraction of PM covered by cortical ER (Wolf 2012)
@@ -22,7 +27,7 @@ N_NPC = 117              # Winey 1997 mean
 def geometry():
     R = (3 * CELL_VOL / (4 * np.pi)) ** (1 / 3)
     Rp = R - WALL_THICK
-    g = {"cell_radius_um": R, "protoplast_radius_um": Rp}
+    g = {"cell_radius_um": R, "protoplast_radius_um": Rp, "cell_volume_um3": CELL_VOL}
     v = {}
     v["cell_wall"] = CELL_VOL - 4 / 3 * np.pi * Rp ** 3
     nuc = FRAC["nucleus"] * CELL_VOL

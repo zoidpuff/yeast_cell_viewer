@@ -75,6 +75,9 @@ export const PAL: Record<number, string> = {
   40: '#F3C643', 41: '#F8E3A0', 42: '#E7A93C',
   48: '#B0437A', 49: '#E07636', 50: '#CDA866', 51: '#C3C27A', 52: '#C9558F', 53: '#7CC6C2',
   56: '#5FAE75', 57: '#7DBE86', 58: '#6BB596', 59: '#5BA8A0', 60: '#C27C55', 61: '#B5653F', 62: '#93B060', 63: '#A68BC9', 64: '#E9C46A', 65: '#9A8352',
+  // membranes coloured by the compartment they enclose, as in the section map (PM, ER, NE, vacuole, mito OM, IM,
+  // Golgi, peroxisome, lipid droplet, cell surface); the PM is a deeper tone of the cytosol's
+  66: '#A9C3E3', 67: '#A3C48C', 68: '#B993C9', 69: '#9FC7C0', 70: '#E8B48F', 71: '#D9946B', 72: '#B7C77E', 73: '#C5B0E0', 74: '#E9C46A', 75: '#9A8352',
   80: '#F6F1E7', 81: '#F1E9D3', 82: '#EEE3CC', 83: '#E4ECF5', 84: '#E8F0DF', 85: '#E8F0DF', 86: '#F1E7F1', 87: '#EBD9EA',
   88: '#E3F0EE', 89: '#F6E6DA', 90: '#F2DCCB', 91: '#F7EDC4', 92: '#EEF1DC', 93: '#EEE8F6', 94: '#ECE8F2',
 };
@@ -109,6 +112,13 @@ export const SPECIAL: Record<string, { c0: string; c1?: string; cls: string }> =
   ribosome_80S_Sec61: { c0: '#EE9BC0', c1: '#C9558F', cls: 'ribosome' },
 };
 
+/** colour of interaction module i: golden-angle hues, three lightness levels */
+export function moduleColor(i: number): string {
+  const h = (i * 137.508) % 360, s = 0.62, l = [0.58, 0.44, 0.70][i % 3];
+  const f = (n: number) => { const k = (n + h / 30) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+  return '#' + [f(0), f(8), f(4)].map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+}
+
 export interface Library {
   types: TypeRec[];
   beads: Float32Array;         // vec4 per bead: xyz, w = bits(kind | plddt << 8)
@@ -117,6 +127,8 @@ export interface Library {
   typeInfo: ArrayBuffer;       // 16 x u32 per type
   modes: Uint32Array;          // conformational motion modes (library/modes.bin; one zero word when absent)
   modeCap: number;             // nm, largest excursion of one bead along its path (0 = no cap)
+  modules: { label: string; n: number }[];   // STRING interaction modules (library/organisation.json; empty when absent)
+  moduleOf: Int32Array;        // per type its dominant module (-1: none)
   nClusters: number;
   byId: Map<string, number>;
 }
@@ -135,6 +147,12 @@ export async function loadLibrary(progress: (msg: string, f: number) => void): P
     const mj = await fetchJson('library/modes.json');
     modes = new Uint32Array(await fetchBin('library/modes.bin')); modeIdx = mj.types; modeCap = mj.cap ?? 1.5;
   } catch { /* no modes in this build */ }
+  // optional: STRING interaction module of each type (organisation layer of the packing)
+  let modules: { label: string; n: number }[] = [], modOf: Record<string, number> = {};
+  try {
+    const oj = await fetchJson('library/organisation.json');
+    modules = oj.modules; modOf = oj.types;
+  } catch { /* no organisation layer in this build */ }
   progress('Building level-of-detail clusters', 0.6);
   const nB = raw.byteLength / 8;
   const i16 = new Int16Array(raw), u8 = new Uint8Array(raw);
@@ -178,10 +196,13 @@ export async function loadLibrary(progress: (msg: string, f: number) => void): P
     tf[16 * ti + 11] = isPDB ? 255 : (t.plddt_mean ?? 255);
     const mi = modeIdx[ti];
     if (mi) { tu[16 * ti + 12] = mi[0]; tu[16 * ti + 13] = mi[1]; tu[16 * ti + 14] = mi[2]; }
+    tu[16 * ti + 15] = modOf[ti] !== undefined ? packColor(moduleColor(modOf[ti])) : 0;
   });
   const byId = new Map<string, number>();
   types.forEach((t, i) => byId.set(t.id, i));
-  return { types, beads, st, clusters, typeInfo, modes, modeCap, nClusters: nC, byId };
+  const moduleOf = new Int32Array(types.length).fill(-1);
+  for (const [ti, m] of Object.entries(modOf)) moduleOf[Number(ti)] = m;
+  return { types, beads, st, clusters, typeInfo, modes, modeCap, modules, moduleOf, nClusters: nC, byId };
 }
 
 export interface TileIndex {
@@ -190,7 +211,8 @@ export interface TileIndex {
   labelMask: Uint32Array; volGlucan: Float32Array; volMannan: Float32Array; key: Map<number, number>;
   wall: any; regionNames: string[];
 }
-export const tkey = (ix: number, iy: number, iz: number) => ((ix + 11) * 22 + (iy + 11)) * 22 + (iz + 11);
+export const TGRID = 26;     // tiles per axis of the tile-state grid (-13 .. 12: +-2.6 um, encloses the real cell outline)
+export const tkey = (ix: number, iy: number, iz: number) => ((ix + 13) * TGRID + (iy + 13)) * TGRID + (iz + 13);
 
 export async function loadTileIndex(): Promise<TileIndex> {
   const j = await fetchJson('tiles/index.json');

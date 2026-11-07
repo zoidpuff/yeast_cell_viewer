@@ -102,13 +102,36 @@ def expected_totals(ing2, oligo_map):
     return e.groupby(["lib_id", "ing_id", "region"], as_index=False).expected.sum()
 
 
-def distribute(exp, measure, lib_index, seed=3):
-    """Multinomial split of each (lib, region) total over tiles proportional to the tile's region measure.
+def crowding_factors(e, M, reg_idx, logmod, vol, iters=30):
+    """Per region, tile factors c_t for the modulated types such that the expected macromolecular volume per tile
+    stays proportional to the region's measure in the tile (composition varies between tiles, crowding does not)"""
+    out = {}
+    for reg, g in e[e.lib_id.isin(logmod)].groupby("region"):
+        ri = reg_idx[reg]; W = M[:, ri]; nz = np.nonzero(W)[0]
+        if len(nz) == 0:
+            continue
+        A = np.stack([np.exp(logmod[l][nz] - logmod[l][nz].max()) for l in g.lib_id])         # rows x tiles
+        V = (g.expected.values * np.array([vol[l] for l in g.lib_id]))[:, None]
+        c = np.ones(len(nz))
+        for _ in range(iters):
+            Wc = A * (W[nz] * c)[None]
+            occ = (V * Wc / Wc.sum(1, keepdims=True)).sum(0)
+            ratio = (W[nz] / W[nz].sum()) / (occ / occ.sum())
+            c *= ratio
+        cf = np.zeros(len(W)); cf[nz] = c / c.mean(); out[ri] = cf
+    return out
+
+
+def distribute(exp, measure, lib_index, seed=3, logmod=None, vol=None):
+    """Multinomial split of each (lib, region) total over tiles proportional to the tile's region measure, times
+    exp(logmod[lib]) per tile if given (organisation.tile_logmod: large-scale co-enrichment of STRING modules) and
+    the crowding correction for those types (crowding_factors, needs vol: lib id -> volume).
     Returns long table tile_i, lib_i, region_i, n (cell totals conserved after stochastic rounding)."""
     rng = np.random.default_rng(seed)
     M = measure.values
     reg_idx = {n: i for i, n in enumerate(t3.REGION_NAMES)}
     e = exp[exp.region.isin(reg_idx)].groupby(["lib_id", "region"], as_index=False).expected.sum()
+    cf = crowding_factors(e, M, reg_idx, logmod, vol) if logmod is not None else {}
     T, Li, Ri, Nn = [], [], [], []
     for r in e.itertuples():
         ri = reg_idx[r.region]
@@ -119,6 +142,9 @@ def distribute(exp, measure, lib_index, seed=3):
         if N == 0:
             continue
         nz = np.nonzero(w)[0]
+        if logmod is not None and r.lib_id in logmod:
+            lw = logmod[r.lib_id][nz]
+            w = np.zeros_like(w); w[nz] = M[nz, ri] * np.exp(lw - lw.max()) * (cf[ri][nz] if ri in cf else 1.0)
         cnt = rng.multinomial(N, w[nz] / w[nz].sum())
         k = cnt > 0
         T.append(nz[k]); Li.append(np.full(k.sum(), lib_index[r.lib_id])); Ri.append(np.full(k.sum(), ri)); Nn.append(cnt[k])
@@ -136,16 +162,16 @@ def prepass(cell, lp, n_nuc, seed=5, log=print, before_chromatin=None):
     npc_pos = cell.npc_pos
     q = np.empty(4); npc_q = []
     rng = np.random.default_rng(seed)
-    for u in cell.pores:
+    for u in cell.pores[:, 3:6]:          # NE normals
         p3.quat_z_to(u.astype(np.float64), rng.uniform(0, 2 * np.pi), q); npc_q.append(q.copy())
     npc_q = np.array(npc_q)
     types = np.full(len(npc_pos), li_npc, np.int32)
-    cn = cell.G[3:6]; rn = cell.G[6]
+    cn = cell.G[3:6]; rn = float(cell.G[11:14].max())
     glo = cn - rn - 80; ghi = cn + rn + 80
     OC, OR = p3.emit_spheres(types, npc_pos.astype(np.float32), npc_q.astype(np.float32), lp["st_off"], lp["STC"], lp["STR"], lp["BR"], glo, ghi)
     lens = np.array(CHROM_KB, float); lens = np.round(lens / lens.sum() * n_nuc).astype(np.int64)
     dirn = cell.G[7:10] - cn; dirn /= np.linalg.norm(dirn)
-    spb = cn - dirn * (rn - c3.PERI_W - 40)
+    spb = c3.nuc_surface(cell.G, -dirn, -(c3.PERI_W + 40))[0]
     starts, r_start = np.tile(spb, (len(lens), 1)), 150.0
     extra = {}
     if before_chromatin is not None:
@@ -187,8 +213,10 @@ def pre_instances(pre):
     return gt, gp, gq
 
 
-def setup_shared(cell, lp, counts, tiles, pre, halo):
+def setup_shared(cell, lp, counts, tiles, pre, halo, partners=None, prm=None):
+    """partners, prm: organisation.partners() CSR arrays and organisation.params() (None: uniform random placement)"""
     _S.update(cell=cell, lp=lp, tiles=tiles, halo=halo, tindex={t: i for i, t in enumerate(tiles)})
+    _S["partners"] = partners; _S["prm"] = prm
     _S["counts"] = {k: g for k, g in counts.groupby("tile")}
     gt, gp, gq = pre_instances(pre)
     _S["glob"] = (gt, gp, gq)
@@ -230,7 +258,7 @@ def pack_one(ti, n_mrna, seed, max_tries=200, give_up=25):
     n = int(t3.TILE / t3.VOX)
     band_m = np.array([t3.BANDS[r][0] for r in t3.BAND_ORDER], np.int64)
     band_w = np.array([t3.BANDS[r][1] for r in t3.BAND_ORDER], np.float64)
-    lab, bits = t3._voxel_regions(lo, n, t3.VOX, *a, band_m, band_w, cell.G[0] - t3.WALL_DEPTH)
+    lab, bits = t3._voxel_regions(lo, n, t3.VOX, *a, band_m, band_w, t3.WALL_DEPTH)
     masks = t3.region_masks(lab, bits)
     vox_off = [0]; VP = []
     for r in range(t3.NREG):
@@ -251,6 +279,8 @@ def pack_one(ti, n_mrna, seed, max_tries=200, give_up=25):
     # obstacles: global (NPC, chromatin) + finished neighbour tiles
     gt, gp, gq = _S["glob"]
     OCs, ORs = [], []
+    ATs, APs = [], []         # anchors for partner attraction: placed instances around the tile
+    k = np.all((gp >= glo) & (gp <= ghi), axis=1); ATs.append(gt[k]); APs.append(gp[k])
     C0, R0 = p3.emit_spheres(gt, gp, gq, lp["st_off"], lp["STC"], lp["STR"], lp["BR"], glo, ghi)
     OCs.append(C0); ORs.append(R0)
     sl_ = [(_S["rna_bucket"][nt]) for nt in [t] + list(neighbours(t)) if nt in _S["rna_bucket"]]   # pre-placed RNA beads
@@ -264,6 +294,7 @@ def pack_one(ti, n_mrna, seed, max_tries=200, give_up=25):
             z = np.load(f)
             C1, R1 = p3.emit_spheres(z["types"], z["pos"], z["quat"], lp["st_off"], lp["STC"], lp["STR"], lp["BR"], glo, ghi)
             OCs.append(C1); ORs.append(R1)
+            k = np.all((z["pos"] >= glo) & (z["pos"] <= ghi), axis=1); ATs.append(z["types"][k]); APs.append(z["pos"][k])
             mp_ = z["mrna_pts"]
             if len(mp_):
                 k = np.all((mp_ >= glo - 1) & (mp_ <= ghi + 1), axis=1)
@@ -273,14 +304,20 @@ def pack_one(ti, n_mrna, seed, max_tries=200, give_up=25):
     cap_s = len(OR) + nsph + n_mrna * 8000 + 1000
     cap_e = cap_s * 14
     t0 = time.time()
+    pr = _S.get("partners")
+    if pr is None:
+        pr = dict(off=np.zeros(0, np.int64), idx=np.zeros(0, np.int64), strength=np.zeros(0), kind=np.zeros(0, np.int64))
+    prm = _S.get("prm") if _S.get("prm") is not None else np.zeros(7)
+    AT = np.concatenate(ATs).astype(np.int64); AP = np.concatenate(APs).astype(np.float64)
     res = p3.pack_tile(seed, lo, t3.TILE, halo, *a, lp["st_off"], lp["STC"], lp["STR"], lp["BR"], t3.REG_MASK,
                        jl, jr, jn, t3.MEM_REGION0, np.array(vox_off, np.int64), VOXP, t3.VOX,
-                       tri_off, tri, cuma, OC, OR, n_mrna, MRNA_MEAN_NT, t3.R_CYTO, max_tries, give_up, cap_s, cap_e)
-    types, pos, quat, placed, mpts, moff, overflow, ns, ne = res
+                       tri_off, tri, cuma, OC, OR, n_mrna, MRNA_MEAN_NT, t3.R_CYTO, max_tries, give_up, cap_s, cap_e,
+                       AT, AP, pr["off"], pr["idx"], pr["strength"], pr["kind"], prm)
+    types, pos, quat, placed, mpts, moff, overflow, ns, ne, att = res
     np.savez(f"{RAW}/{t3.tile_name(t)}.npz", types=types, pos=pos, quat=quat, job_lib=jl.astype(np.int32),
              job_region=jr.astype(np.int16), job_n=jn.astype(np.int32), job_placed=placed.astype(np.int32),
              mrna_pts=mpts, mrna_off=moff, overflow=overflow)
-    return ti, int(jn.sum()), int(placed.sum()), bool(overflow), time.time() - t0, len(moff) - 1
+    return ti, int(jn.sum()), int(placed.sum()), bool(overflow), time.time() - t0, len(moff) - 1, int(att[0]), int(att[1])
 
 
 def _pw(args):

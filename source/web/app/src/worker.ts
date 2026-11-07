@@ -2,6 +2,7 @@
 // Tile decoder + procedural near-camera detail (lipids, beta-glucan, mannan).
 // All procedural content is deterministic (seeded by tile and element index), so regenerating a region
 // after the cut plane moves reproduces exactly the same molecules.
+import { outerDepth, outerNormal } from './fields';
 
 const TILE = 200, Q_ORG = 80, QSTEP = 360 / 65535, MR_Q = 0.005, LK_Q = 0.01;
 const INV_SQRT2 = 0.70710678;
@@ -12,6 +13,7 @@ let bo: Uint32Array, nbArr: Uint32Array, brArr: Float32Array;
 let beadXYZ: Float32Array;   // library beads (nm), 3 per bead
 let ready: Promise<void> | null = null;
 let G: number[] = [];
+let SDF: Float32Array | null = null;   // real-shape distance fields (fields.ts); null: spherical cell
 let wallP: { glucanPerNm3: number; mannanPerProtein: number } = { glucanPerNm3: 0.018147, mannanPerProtein: 1908.6 };
 
 interface Decoded {
@@ -38,7 +40,7 @@ async function gunzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
 }
 
 async function init(msg: any) {
-  base = msg.base; G = msg.G;
+  base = msg.base; G = msg.G; SDF = msg.F ?? null;
   try { const r = await fetch(base + 'version.json', { cache: 'no-store' }); if (r.ok) ver = String((await r.json()).v ?? ''); } catch { ver = ''; } if (msg.wall) wallP = msg.wall;
   if (msg.embedded) embedded = msg.embedded;
   const tj = JSON.parse(new TextDecoder().decode(await getBin('library/types.json')));
@@ -235,7 +237,7 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
   const stats = { lipCand: 0, lipMasked: 0, glucan: 0, mannan: 0 };
   const P = new Float64Array(12);
   const inRange = (x: number, y: number, z: number, m: number) => {
-    if (R.mode === 'shell') return Math.hypot(x, y, z) > G[0] - 70 - m;
+    if (R.mode === 'shell') return outerDepth(SDF, G, x, y, z) < 70 + m;
     const s = sOf(R, x, y, z); return s >= R.lo - m && s <= R.hi + m;
   };
 
@@ -308,7 +310,7 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
 
   // ---- cell wall: beta-glucan (inner layer) and mannan brushes on mannoproteins (outer layer)
   if (want.wall && (G.length > 0)) {
-    const Ro = G[0], Rmi = G[1], Rpm = G[2];
+    const WD = G[0] - G[2], MD = G[0] - G[1];        // depths of the plasma membrane and of the mannan/glucan boundary
     const lo = D.lo;
     const nI = D.inst.length / 4;
     const wall: { w: Uint32Array; i: number; lo: number[]; id: number }[] = [];
@@ -329,10 +331,10 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
         let x = 0, y = 0, z = 0, ok = false;
         for (let tries = 0; tries < 40 && !ok; tries++) {
           x = lo[0] + r() * TILE; y = lo[1] + r() * TILE; z = lo[2] + r() * TILE;
-          const rr = Math.hypot(x, y, z); ok = rr > Rpm + 2 && rr < Rmi - 1;
+          const dep = outerDepth(SDF, G, x, y, z); ok = dep < WD - 2 && dep > MD + 1;
         }
         if (!ok) continue;
-        let rl = Math.hypot(x, y, z), ex = x / rl, ey = y / rl, ez = z / rl;
+        let [ex, ey, ez] = outerNormal(SDF, G, x, y, z);
         let dx = gauss(r), dy = gauss(r), dz = gauss(r);
         let dd = dx * ex + dy * ey + dz * ez; dx -= dd * ex; dy -= dd * ey; dz -= dd * ez;
         let dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
@@ -340,10 +342,10 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
           if (!inBox(x, y, z)) break;
           if (inRange(x, y, z, 1) && !hash.near(x, y, z, 1.35)) { free.push(x, y, z, (2 | ((c & 0xFFFF) << 4)) >>> 0); stats.glucan++; }
           dx += 0.12 * gauss(r); dy += 0.12 * gauss(r); dz += 0.12 * gauss(r);
-          rl = Math.hypot(x, y, z); ex = x / rl; ey = y / rl; ez = z / rl;
+          [ex, ey, ez] = outerNormal(SDF, G, x, y, z);
           dd = dx * ex + dy * ey + dz * ez;
-          const rr = rl;
-          const keep = (rr < Rpm + 3 && dd < 0) || (rr > Rmi - 2 && dd > 0) ? -1.0 : 0.6;   // reflect at layer walls
+          const dep = outerDepth(SDF, G, x, y, z);
+          const keep = (dep > WD - 3 && dd < 0) || (dep < MD + 2 && dd > 0) ? -1.0 : 0.6;   // reflect at layer walls
           dx -= (1 - keep) * dd * ex; dy -= (1 - keep) * dd * ey; dz -= (1 - keep) * dd * ez;
           dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
           x += 1.2 * dx; y += 1.2 * dy; z += 1.2 * dz;
@@ -355,14 +357,14 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
     for (const e of wall) {
       const { type } = instPose(e.w, e.i, lo, P);
       const cx = P[0], cy = P[1], cz = P[2];
-      const rc = Math.hypot(cx, cy, cz);
-      if (rc < Rmi - 5) continue;
+      const depc = outerDepth(SDF, G, cx, cy, cz);
+      if (depc > MD + 5) continue;
       if (R.mode === 'slab') { const s = sOf(R, cx, cy, cz); if (s < R.lo - 45 - brArr[type] || s > R.hi + 45 + brArr[type]) { chainId += 80; continue; } }
-      else if (rc < Ro - 120) continue;
+      else if (depc > 120) continue;
       const r = rng(hash3(tileIdx, e.i, 99));
       const b0 = bo[type], nb = nbArr[type];
       let budget = wallP.mannanPerProtein;
-      const ex = cx / rc, ey = cy / rc, ez = cz / rc;
+      const [ex, ey, ez] = outerNormal(SDF, G, cx, cy, cz);
       while (budget > 0) {
         const L = Math.min(Math.ceil(budget), 12 + Math.floor(r() * 27));
         budget -= L;
@@ -374,10 +376,9 @@ function genDetail(tileIdx: number, D: Decoded, R: Range, want: { lipids: boolea
         x += 1.3 * dx; y += 1.3 * dy; z += 1.3 * dz;
         const cid = chainId++;
         for (let s = 0; s < L; s++) {
-          const rr = Math.hypot(x, y, z);
-          if (rr > Ro - 0.6) break;
+          if (outerDepth(SDF, G, x, y, z) < 0.6) break;
           if (inRange(x, y, z, 1) && !hash.near(x, y, z, 1.15, s < 2 ? e.i : -1)) { free.push(x, y, z, (3 | ((cid & 0xFFFF) << 4)) >>> 0); stats.mannan++; }
-          dx += 0.35 * gauss(r) + 0.18 * x / rr; dy += 0.35 * gauss(r) + 0.18 * y / rr; dz += 0.35 * gauss(r) + 0.18 * z / rr;
+          dx += 0.35 * gauss(r) + 0.18 * ex; dy += 0.35 * gauss(r) + 0.18 * ey; dz += 0.35 * gauss(r) + 0.18 * ez;
           dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
           x += 1.05 * dx; y += 1.05 * dy; z += 1.05 * dz;
         }

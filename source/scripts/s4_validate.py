@@ -71,11 +71,12 @@ def main():
     ctree = cKDTree(POa); mtree = cKDTree(MRP); BRa = lp["BR"]
     rng = np.random.default_rng(42)
     corners = [np.array(tiles[i], float) * t3.TILE for i in rng.choice(len(tiles), 400)]
-    corners = [c for c in corners if np.linalg.norm(c) < cell.G[2] - 60][:32]
+    pm_depth = lambda p: c3.outer_depth(p[0], p[1], p[2], cell.G) - (cell.G[0] - cell.G[2])
+    corners = [c for c in corners if pm_depth(c) > 60][:32]
     randc = []
     while len(randc) < 32:
         p = rng.uniform(-2000, 2000, 3)
-        if np.linalg.norm(p) < cell.G[2] - 40: randc.append(p)
+        if pm_depth(p) > 40: randc.append(p)
     half = 25.0; n_beads = n_clash = n_clash_x = 0
     for cc in corners + randc:
         cand = np.array(ctree.query_ball_point(cc, half * np.sqrt(3) + 66.0), np.int64)

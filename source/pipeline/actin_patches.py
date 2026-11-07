@@ -211,13 +211,14 @@ def place(cell, lp, n_actin, n_arp_max, n_cp_max, obstacles=None, seed=41, log=p
     def find_site():
         for _ in range(200):
             u = rng.normal(size=3); u /= np.linalg.norm(u)
-            for r in np.arange(0.85, 1.0, 0.002) * G[0]:
-                p = u * r * G[:3] / G[0]
+            r0 = c3.ray_depth(G, u, G[0] - G[2] + 17.5)           # just inside the plasma membrane
+            for r in r0 - np.arange(0.0, 6.0, 0.5):
+                p = u * r
                 c3.mem_sdfs(p[0], p[1], p[2], *a, out)
                 if abs(out[c3.M_PM]) < 18.0:
                     m = c3.mem_sdfs(p[0], p[1], p[2], *a, out); l = c3.label_from(p[0], p[1], p[2], G, cell.pores, out, m)
                     if l == c3.CYTO and c3.min_mem_dist(out, -1) >= abs(out[c3.M_PM]) - 0.5:   # PM is the nearest membrane
-                        nrm = p / G[:3] ** 2; return p, nrm / np.linalg.norm(nrm)
+                        nrm = -c3._grad(lambda x, y, z: c3.outer_depth(x, y, z, G), p); return p, nrm
                     break
         return None, None
 

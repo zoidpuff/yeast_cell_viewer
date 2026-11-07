@@ -146,8 +146,7 @@ def check_membrane(P, R, ZL, own, G, pores, pidx, PT, PQ, PC, out):
         c3.mem_sdfs(P[s, 0], P[s, 1], P[s, 2], G, pores, pidx, PT, PQ, PC, out)
         if c3.min_mem_dist(out, own) < R[s] + c3.HALF:
             return False
-        r = np.sqrt(P[s, 0] ** 2 + P[s, 1] ** 2 + P[s, 2] ** 2)
-        if r + R[s] > G[0]:
+        if out[c3.M_OUTER] < R[s]:          # outside the cell
             return False
         z = ZL[s]
         if abs(z) >= R[s] + c3.HALF:
@@ -184,18 +183,32 @@ def project_to_membrane(p, m, n, G, pores, pidx, PT, PQ, PC, out):
 
 @nb.njit(cache=True, fastmath=True)
 def near_pore(p, G, pores, lim):
-    vx, vy, vz = p[0] - G[3], p[1] - G[4], p[2] - G[5]
-    for k in range(pores.shape[0]):
-        z = vx * pores[k, 0] + vy * pores[k, 1] + vz * pores[k, 2]
-        if z <= 0:
-            continue
-        rx, ry, rz = vx - z * pores[k, 0], vy - z * pores[k, 1], vz - z * pores[k, 2]
-        if rx * rx + ry * ry + rz * rz < lim * lim:
-            return True
-    return False
+    return c3.in_pore(p[0], p[1], p[2], pores, lim) >= 0
 
 
 # ------------------------------------------------------------------ tile packer
+KRES = 32     # anchors kept per library type (uniform reservoir sample of everything placed in the tile + halo)
+
+
+@nb.njit(cache=True)
+def _res_add(res_pos, res_n, ty, p):
+    n = res_n[ty]
+    slot = n if n < KRES else int(np.random.random() * (n + 1))
+    if slot < KRES:
+        for k in range(3):
+            res_pos[ty, slot, k] = p[k]
+    res_n[ty] = n + 1
+
+
+@nb.njit(cache=True)
+def _near(res_pos, res_n, pt, d, t):
+    """t = a random kept anchor of type pt + d along a random direction"""
+    slot = int(np.random.random() * min(res_n[pt], KRES))
+    dx = np.random.normal(); dy = np.random.normal(); dz = np.random.normal()
+    dn = np.sqrt(dx * dx + dy * dy + dz * dz) + 1e-12
+    t[0] = res_pos[pt, slot, 0] + d * dx / dn; t[1] = res_pos[pt, slot, 1] + d * dy / dn; t[2] = res_pos[pt, slot, 2] + d * dz / dn
+
+
 @nb.njit(cache=True)
 def pack_tile(seed, lo, size, halo,
               G, pores, pidx, PT, PQ, PC,
@@ -205,8 +218,19 @@ def pack_tile(seed, lo, size, halo,
               tri_off, TRI, CUMA,
               OC, OR,
               n_mrna, mrna_mean, cyto_region,
-              max_tries, give_up, cap_s, cap_e):
+              max_tries, give_up, cap_s, cap_e,
+              AT, AP, ptn_off, ptn_idx, ptn_str, ptn_kind, prm):
+    """... AT, AP: types and positions of instances already placed around the tile (anchors); ptn_off/ptn_idx/ptn_str/ptn_kind:
+    partner CSR over library types and prm (A_contact, A_loose, K_half, P_max, attract tries, loose gap min, max),
+    see organisation.py. Empty ptn_off disables attraction."""
     np.random.seed(seed)
+    n_types = BR.shape[0]
+    res_pos = np.empty((n_types, KRES, 3)); res_n = np.zeros(n_types, np.int64)
+    for ia in range(AT.shape[0]):
+        _res_add(res_pos, res_n, AT[ia], AP[ia])
+    use_att = ptn_off.shape[0] == n_types + 1
+    wk = np.empty(256); att_stats = np.zeros(2, np.int64)
+    att_tries = int(prm[4]) if use_att else 0
     glo = lo - halo; ghi = lo + size + halo
     dims, head, nxt, sid, cen, rad, cnt = grid_new(glo, ghi, H_GRID, cap_s, cap_e)
     ok = g_insert(glo, H_GRID, dims, head, nxt, sid, cen, rad, cnt, OC, OR)
@@ -241,8 +265,35 @@ def pack_tile(seed, lo, size, halo,
         fails_in_row = 0
         for inst in range(jn[j]):
             success = False
+            att_k = -1
+            if use_att and ptn_off[li + 1] > ptn_off[li]:
+                tot = 0.0
+                for k in range(ptn_off[li], ptn_off[li + 1]):
+                    nn = float(res_n[ptn_idx[k]])
+                    a_ = ptn_str[k] * prm[ptn_kind[k]] * nn / (prm[2] + nn)
+                    wk[k - ptn_off[li]] = a_; tot += a_
+                if tot > 0 and np.random.random() < min(prm[3], tot):
+                    x = np.random.random() * tot
+                    for k in range(ptn_off[li], ptn_off[li + 1]):
+                        x -= wk[k - ptn_off[li]]
+                        if x <= 0:
+                            att_k = k
+                            break
+                    if att_k < 0:
+                        att_k = ptn_off[li + 1] - 1
+                    att_stats[0] += 1
             for tr in range(max_tries):
-                if is_mem:
+                near = att_k >= 0 and tr < att_tries
+                if near:
+                    pt = ptn_idx[att_k]
+                    if ptn_kind[att_k] == 0:
+                        dd = (BR[li] + BR[pt]) * (0.45 + 0.5 * np.random.random())
+                    else:
+                        dd = BR[li] + BR[pt] + prm[5] + (prm[6] - prm[5]) * np.random.random()
+                    _near(res_pos, res_n, pt, dd, t)
+                if is_mem and near:
+                    pass
+                elif is_mem:
                     u = np.random.random() * CUMA[t1 - 1] if t0 == 0 else CUMA[t0 - 1] + np.random.random() * (CUMA[t1 - 1] - CUMA[t0 - 1])
                     # binary search in [t0, t1)
                     lo_i = t0; hi_i = t1 - 1
@@ -257,6 +308,7 @@ def pack_tile(seed, lo, size, halo,
                         a = 1 - a; b = 1 - b
                     for k in range(3):
                         t[k] = TRI[lo_i, k] + a * (TRI[lo_i, 3 + k] - TRI[lo_i, k]) + b * (TRI[lo_i, 6 + k] - TRI[lo_i, k])
+                if is_mem:
                     if not project_to_membrane(t, mi, nrm, G, pores, pidx, PT, PQ, PC, out):
                         continue
                     if t[0] < lo[0] or t[1] < lo[1] or t[2] < lo[2] or t[0] >= lo[0] + size or t[1] >= lo[1] + size or t[2] >= lo[2] + size:
@@ -271,9 +323,13 @@ def pack_tile(seed, lo, size, halo,
                     if not check_membrane(P, str_, ZL, mi, G, pores, pidx, PT, PQ, PC, out):
                         continue
                 else:
-                    vi = v0 + int(np.random.random() * (v1 - v0))
-                    for k in range(3):
-                        t[k] = VOXP[vi, k] + (np.random.random() - 0.5) * vox_h
+                    if near:
+                        if t[0] < lo[0] or t[1] < lo[1] or t[2] < lo[2] or t[0] >= lo[0] + size or t[1] >= lo[1] + size or t[2] >= lo[2] + size:
+                            continue
+                    else:
+                        vi = v0 + int(np.random.random() * (v1 - v0))
+                        for k in range(3):
+                            t[k] = VOXP[vi, k] + (np.random.random() - 0.5) * vox_h
                     rand_quat(q)
                     quat_mat(q, M)
                     transform(stc, M, t, P)
@@ -290,6 +346,10 @@ def pack_tile(seed, lo, size, halo,
                 for k in range(4):
                     oquat[no, k] = q[k]
                 no += 1; placed[j] += 1
+                if use_att:
+                    _res_add(res_pos, res_n, li, t)
+                    if near:
+                        att_stats[1] += 1
                 success = True
                 break
             if overflow:
@@ -377,7 +437,7 @@ def pack_tile(seed, lo, size, halo,
             mr_off[c + 1] = nb_
         mr_pts = mr_pts[:nb_]
         mr_off = mr_off[:n_mrna + 1]
-    return otype[:no], opos[:no], oquat[:no], placed, mr_pts, mr_off, overflow, cnt[0], cnt[1]
+    return otype[:no], opos[:no], oquat[:no], placed, mr_pts, mr_off, overflow, cnt[0], cnt[1], att_stats
 
 
 # ------------------------------------------------------------------ helpers for obstacles

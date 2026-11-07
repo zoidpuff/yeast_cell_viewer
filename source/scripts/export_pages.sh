@@ -27,7 +27,7 @@ cp "$BUNDLE/MODEL.md" MODEL.md       # full model description (also shown in the
 # GitHub Pages does not compress .bin files: pre-compress the uncompressed library files under their own names
 # (the viewer recognises gzip data by its magic bytes and inflates it itself)
 for f in data/library/beads.bin data/library/spheretree.bin data/library/types.json data/library/modes.bin data/types_tiles.bin \
-         data/geometry.json data/bookmarks.json; do
+         data/geometry.json data/geometry_fields.bin data/bookmarks.json; do
   [ -f "$f" ] && gzip -9 -n -c "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 # build stamp: appended to every data URL, so browsers never mix cached files from two builds

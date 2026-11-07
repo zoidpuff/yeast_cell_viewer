@@ -12,6 +12,7 @@ export interface FrameState {
   selId: number; shaded: boolean; organelle: boolean; motion: number;
   l0px: number; l1px: number; minpx: number; outline: number;
   showMeshes: boolean; showLipids: boolean; renderScale: number;
+  memColors: boolean;   // only membranes shown: the whole cell's membrane surfaces, coloured by enclosed compartment, no cut
 }
 
 export interface MeshDraw { slot: number; vb: GPUBuffer; ib: GPUBuffer; nIdx: number; under: boolean }
@@ -118,7 +119,7 @@ export class Renderer {
     this.freeList = mk(this.capFree * 4, BU.STORAGE, 'freeList');
     this.freeParams = mk(16, BU.UNIFORM | BU.COPY_DST, 'freeParams');
     this.meshUni = mk(256 * (this.maxSlots + 16), BU.UNIFORM | BU.COPY_DST, 'meshUniforms');
-    this.tileState = mk(22 * 22 * 22 * 4, STO, 'tileState');
+    this.tileState = mk(26 * 26 * 26 * 4, STO, 'tileState');     // data.TGRID^3
     this.pickBuf = d.createBuffer({ size: 16, usage: BU.MAP_READ | BU.COPY_DST });
     this.pickParams = mk(16, BU.UNIFORM | BU.COPY_DST, 'pickParams');
     this.pickOut = mk(16, BU.STORAGE | BU.COPY_SRC, 'pickOut');
@@ -136,9 +137,9 @@ export class Renderer {
       for (let k = 0; k < 8; k++) pf[12 * i + k] = geo.PQ[8 * i + k];
       pu[12 * i + 8] = geo.PT[i]; pu[12 * i + 9] = geo.PC[i];
     }
-    const nPore = geo.pores.length / 3;
-    const pores = new Float32Array(Math.max(1, nPore) * 4);
-    for (let i = 0; i < nPore; i++) { pores[4 * i] = geo.pores[3 * i]; pores[4 * i + 1] = geo.pores[3 * i + 1]; pores[4 * i + 2] = geo.pores[3 * i + 2]; }
+    const nPore = geo.pores.length / 6;      // centre xyz, normal xyz
+    const pores = new Float32Array(Math.max(1, nPore) * 8);
+    for (let i = 0; i < nPore; i++) for (let k = 0; k < 3; k++) { pores[8 * i + k] = geo.pores[6 * i + k]; pores[8 * i + 4 + k] = geo.pores[6 * i + 3 + k]; }
     const g = geo.grid;
     const nPI = g.prim_idx.length;
     const off = new Uint32Array(g.prim_off.length + g.pore_off.length);
@@ -148,12 +149,14 @@ export class Renderer {
     idx.set(g.prim_idx, 0); idx.set(g.pore_idx, nPI);
     const G = geo.G, C = geo.consts;
     const guni = new Float32Array([G[0], G[1], G[2], G[3], G[4], G[5], G[6], G[7], G[8], G[9], G[10], 0,
-      C.PORE_R, C.PERI_W, C.IMS_W, nPore, g.n, g.ext, 0, 0]);
+      C.PORE_R, C.PERI_W, C.IMS_W, nPore, g.n, g.ext, 0, 0,
+      G[11], G[12], G[13], 0, G[14], G[15], G[16], 0, G[17], G[18], G[19], 0, G[20], G[21], G[22], 0]);
     const mkd = (data: ArrayBufferView | ArrayBuffer, usage: number) => {
       const b = d.createBuffer({ size: Math.ceil((data as any).byteLength / 16) * 16 + 16, usage: usage | BU.COPY_DST });
       d.queue.writeBuffer(b, 0, data as any); return b;
     };
-    this.fillBufs = [mkd(prims, BU.STORAGE), mkd(pores, BU.STORAGE), mkd(off, BU.STORAGE), mkd(idx, BU.STORAGE), mkd(guni, BU.UNIFORM)];
+    this.fillBufs = [mkd(prims, BU.STORAGE), mkd(pores, BU.STORAGE), mkd(off, BU.STORAGE), mkd(idx, BU.STORAGE), mkd(guni, BU.UNIFORM),
+      mkd(geo.F ?? new Float32Array(4), BU.STORAGE)];     // real-shape distance fields (fields.ts; [0] = 0: none)
   }
 
   async initPipelines() {
@@ -171,7 +174,7 @@ export class Renderer {
     this.bgl.l2 = L([ro(0, SU.VERTEX)]);
     this.bgl.sph = L([ro(0, SU.VERTEX), ro(1, SU.VERTEX), ro(2, SU.VERTEX)]);
     this.bgl.mesh = L([un(0, VF, true)]);
-    this.bgl.fill = L([ro(0, SU.FRAGMENT), ro(1, SU.FRAGMENT), ro(2, SU.FRAGMENT), ro(3, SU.FRAGMENT), un(4, SU.FRAGMENT), ro(5, SU.FRAGMENT)]);
+    this.bgl.fill = L([ro(0, SU.FRAGMENT), ro(1, SU.FRAGMENT), ro(2, SU.FRAGMENT), ro(3, SU.FRAGMENT), un(4, SU.FRAGMENT), ro(5, SU.FRAGMENT), ro(6, SU.FRAGMENT)]);
     this.bgl.comp = L([
       { binding: 0, visibility: SU.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 1, visibility: SU.FRAGMENT, texture: { sampleType: 'uint' } },
@@ -241,7 +244,7 @@ export class Renderer {
     this.bg.fre = B(this.bgl.sph, [this.freePool, this.freePagesBuf, this.freeList]);
     this.bg.mesh = d.createBindGroup({ layout: this.bgl.mesh, entries: [{ binding: 0, resource: { buffer: this.meshUni, size: 16 } }] });
     const fb = this.fillBufs;
-    this.bg.fill = B(this.bgl.fill, [fb[0], fb[1], fb[2], fb[3], fb[4], this.tileState]);
+    this.bg.fill = B(this.bgl.fill, [fb[0], fb[1], fb[2], fb[3], fb[4], this.tileState, fb[5]]);
   }
 
   resize(scale = 1) {
@@ -273,6 +276,7 @@ export class Renderer {
     const vp = mul4(proj, view), ivp = inv4(vp);
     const eye = cam.eye;
     const buf = new ArrayBuffer(512), f = new Float32Array(buf), u = new Uint32Array(buf);
+    const memView = fs.memColors && !fs.organelle;
     f.set(proj, 0); f.set(view, 16); f.set(ivp, 32);
     const pxu = cam.pxPerNmAtUnit(this.height);
     f.set([eye[0], eye[1], eye[2], pxu], 48);
@@ -280,7 +284,7 @@ export class Renderer {
     f.set([n[0], n[1], n[2], fs.plane[3]], 52);
     const nv = [view[0] * n[0] + view[4] * n[1] + view[8] * n[2], view[1] * n[0] + view[5] * n[1] + view[9] * n[2], view[2] * n[0] + view[6] * n[1] + view[10] * n[2]];
     f.set([nv[0], nv[1], nv[2], dot(n, eye) - fs.plane[3]], 56);
-    f.set([fs.cutOn ? 1 : 0, fs.slab, Math.min(400, Math.max(20, fs.slab)), performance.now() / 1000], 60);
+    f.set([fs.cutOn && !memView ? 1 : 0, fs.slab, Math.min(400, Math.max(20, fs.slab)), performance.now() / 1000], 60);
     f.set([fs.l0px, fs.l1px, fs.minpx, 0.6], 64);
     f.set([this.width, this.height, 1 / this.width, 1 / this.height], 68);
     f.set(cam.frustum(aspect), 72);
@@ -288,7 +292,7 @@ export class Renderer {
     u.set([fs.selId >>> 0, 0, fs.shaded ? 1 : 0, fs.organelle ? 1 : 0], 100);
     f.set([360 / 65535, 0.8, fs.outline, Math.min(window.devicePixelRatio || 1, 2) * fs.renderScale], 104);
     f.set([geoG[0], geoG[1], geoG[2], cam.near()], 108);
-    u.set([this.capL0, Math.round(fs.motion * 1000), Math.round(this.modeCap * 1000), 0], 112);
+    u.set([this.capL0, Math.round(fs.motion * 1000), Math.round(this.modeCap * 1000), memView ? 1 : 0], 112);
     this.device.queue.writeBuffer(this.uni, 0, buf, 0, 464);
   }
 
@@ -298,7 +302,8 @@ export class Renderer {
     this.writeUniforms(cam, fs, geoG);
     const enc = d.createCommandEncoder();
     enc.clearBuffer(this.counters);
-    const drawMolecules = !fs.organelle;
+    const memView = fs.memColors && !fs.organelle;      // membranes only: whole-cell surfaces instead of tiles
+    const drawMolecules = !fs.organelle && !memView;
     if (drawMolecules) {
       const cp = enc.beginComputePass();
       cp.setBindGroup(0, this.bg.g0);
@@ -333,10 +338,10 @@ export class Renderer {
     rp.setBindGroup(0, this.bg.g0);
     rp.setPipeline(this.pipes.fill as GPURenderPipeline); rp.setBindGroup(1, this.bg.fill); rp.draw(3);
     // membranes
-    if (fs.organelle) {
+    if (fs.organelle || memView) {
       rp.setPipeline(this.pipes.mesh as GPURenderPipeline);
       const slot = this.maxSlots;   // reserved uniform slot for organelle meshes
-      d.queue.writeBuffer(this.meshUni, slot * 256, new Uint32Array([0, 1, 0, 0]));
+      d.queue.writeBuffer(this.meshUni, slot * 256, new Uint32Array([0, fs.organelle ? 1 : 3, 0, 0]));
       for (const m of this.organelleMeshes) {
         rp.setBindGroup(1, this.bg.mesh, [slot * 256]);
         rp.setVertexBuffer(0, m.vb); rp.setIndexBuffer(m.ib, 'uint32'); rp.drawIndexed(m.nIdx, 1);

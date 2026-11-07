@@ -22,7 +22,9 @@ Where to look for a given part of the model:
 | Residue beads, sphere trees, pLDDT trimming | `pipeline/structlib.py`, `pipeline/build_structs.py` |
 | Membrane orientation | `pipeline/membrane_orient.py` |
 | Cell geometry (signed-distance fields) | `pipeline/cell3d.py`, `pipeline/tiles3d.py` |
+| Real cell, nucleus and vacuole shapes (segmented meshes → distance fields) | `pipeline/cellshape.py`, `pipeline/cell_meshes.npz`, `scripts/cell_meshes.py` |
 | Packing (random sequential addition, collision grid) | `pipeline/pack3d.py`, `pipeline/wc3d.py` |
+| Organisation layer of the packing (STRING modules, partner attraction) | `pipeline/organisation.py` |
 | Pre-placed structures | `polysome.py`, `mrna.py`, `er_ribosomes.py`, `microtubules.py`, `cytoskeleton.py`, `actin_patches.py`, `atp_dimers.py`, `supercomplexes.py`, `fg_mesh.py` in `pipeline/` |
 | Validation | `pipeline/val3d.py`, `scripts/s4_validate.py` |
 | Viewer data format | `pipeline/webenc.py` (format in its docstring) |
@@ -51,6 +53,10 @@ These are not in the repository; all are public downloads.
 | Paralog pairs | `pipeline/data/alliance_yeast_paralog_pairs.csv` | Alliance of Genome Resources |
 | AlphaFold DB proteome | `YC_AFDB_TAR` | `UP000002311_559292_YEAST_v6.tar` from the AlphaFold DB FTP site |
 | AlphaFold DB predicted dimers | `YC_DIMERS` (`homodimers/`, `heterodimers/`) | AlphaFold DB yeast homo- and heterodimer models |
+| Segmented meshes of the model cell | `pipeline/cell_meshes.npz` (in the repository) | Extracted by `scripts/cell_meshes.py` from segmented meshes of EMPIAR-11416 (`YC_ORGANELLE_MESHES`); only needed to re-extract |
+| Organelle shape statistics | `pipeline/organelle_stats.json` (in the repository) | Derived by `scripts/organelle_stats.py` from segmented meshes of EMPIAR-11416 cells (`YC_ORGANELLE_MESHES`); only needed to re-derive the statistics |
+| STRING v12 yeast links | `pipeline/data/string/4932.protein.links.v12.0.txt.gz` | stringdb-downloads.org, `protein.links.v12.0` |
+| Pool pair scores (stage 3 organisation layer) | `YC_POOL_SCORES` | `summary_models.parquet` of the in-house AlphaFold 3 pool predictions; not public. Without it, run stage 3 with `--random` |
 | Pool predictions (stage 6 only) | `POOL_DB` | Foldcomp database of in-house AlphaFold 3 pool predictions; not public. The fitted modes ship in `data/library/modes.bin`. |
 
 PDB assemblies are downloaded from RCSB on demand and cached.

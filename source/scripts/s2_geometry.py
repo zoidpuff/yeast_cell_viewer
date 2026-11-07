@@ -1,12 +1,20 @@
-"""Stage 2: analytic cell geometry, 200 nm tiling, per-tile region measures and membrane meshes.
-Notebook cells 24, 25 (+ the cell-28 re-index to canonical tile order)."""
+"""Stage 2: cell geometry, 200 nm tiling, per-tile region measures and membrane meshes.
+Notebook cells 24, 25 (+ the cell-28 re-index to canonical tile order).
+
+  python s2_geometry.py            # real cell outline, nucleus and vacuoles from segmented cryo-FIB/SEM meshes (cellshape.py)
+  python s2_geometry.py --sphere   # the analytic cell (sphere, ellipsoidal nucleus, resampled vacuole lobes)
+"""
 from _common import *
 import inventory as inv, cell3d as c3, tiles3d as t3
 
 
 def main():
     df, geo = inv.build()
-    cell = c3.build(geo, seed=11)
+    shapes = None
+    if "--sphere" not in sys.argv:
+        import cellshape
+        shapes = cellshape.build(geo, np.random.default_rng(11), log=log)
+    cell = c3.build(geo, seed=11, log=log, shapes=shapes)
     cell.to_json(f"{C.W3D}/geometry.json")
     log("prims", len(cell.PT), "pores", len(cell.pores))
     # Monte-Carlo volume check (4M points in the cell sphere)

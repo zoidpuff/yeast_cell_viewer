@@ -1,6 +1,7 @@
 // Streaming tile manager: decides which 200 nm tiles are needed for the current view and cut, loads them
 // through web workers, and manages GPU pool pages (instances, lipids, free spheres) with LRU eviction.
-import { TileIndex, Library, tkey } from './data';
+import { outerDepth, outerNormal } from './fields';
+import { TGRID, TileIndex, Library, tkey } from './data';
 import { Renderer, MeshDraw } from './renderer';
 import { PAGE, SPAGE } from './shaders';
 import { Camera } from './camera';
@@ -8,6 +9,9 @@ import { V3, dot, sub, len } from './math';
 import TileWorker from './worker.ts?worker&inline';
 
 const TILE = 200, HALF_DIAG = 173.3, MOL_MARGIN = 70;
+// exterior view (no cut): only the outer wall is visible above the backdrop drawn at the mannan/glucan boundary
+// (shaders.ts fsFill), so tiles reaching less than this deep below the cell surface are loaded
+const SHELL_DEPTH = 60;
 
 class PageAlloc {
   used: Uint8Array; n: number; count = 0; high = 0;
@@ -37,14 +41,14 @@ export interface LoadedTile {
 }
 
 export class TileManager {
-  idx: TileIndex; r: Renderer; lib: Library; G: number[];
+  idx: TileIndex; r: Renderer; lib: Library; G: number[]; F: Float32Array | null = null;
   workers: Worker[] = [];
   state: Uint8Array;
   loaded = new Map<number, LoadedTile>();
   instA: PageAlloc; lipA: PageAlloc; freeA: PageAlloc;
   slots: number[] = [];
   pageTile: Int32Array; pageLocal: Uint32Array;
-  tileState = new Uint32Array(22 * 22 * 22);
+  tileState = new Uint32Array(TGRID * TGRID * TGRID);
   desired: number[] = []; desiredSet = new Set<number>();
   inflight = 0; maxInflight = 12; detInflight = 0; maxDetInflight = 3;
   frameNo = 0;
@@ -53,9 +57,10 @@ export class TileManager {
   bytesLoaded = 0; tilesLoadedTotal = 0; starved = false; detailStats = { lipids: 0, glucan: 0, mannan: 0 };
   detailEnabled = true;
   lastLoadErr = '';
+  shellRange: Float32Array | null = null;
 
   constructor(idx: TileIndex, r: Renderer, lib: Library, geo: any, nWorkers: number, embedded?: Record<string, Uint8Array>) {
-    this.idx = idx; this.r = r; this.lib = lib; this.G = geo.G;
+    this.idx = idx; this.r = r; this.lib = lib; this.G = geo.G; this.F = geo.F ?? null;
     this.state = new Uint8Array(idx.n);
     this.instA = new PageAlloc(r.instPages); this.lipA = new PageAlloc(r.lipPages); this.freeA = new PageAlloc(r.freePages);
     for (let s = r.maxSlots - 1; s >= 0; s--) this.slots.push(s);
@@ -65,7 +70,7 @@ export class TileManager {
     for (let w = 0; w < nWorkers; w++) {
       const wk: Worker = new TileWorker();
       wk.onmessage = (e) => this.onMessage(e.data);
-      wk.postMessage({ cmd: 'init', base, G: geo.G, volGlucan: volG, embedded,
+      wk.postMessage({ cmd: 'init', base, G: geo.G, F: geo.F, volGlucan: volG, embedded,
         wall: { glucanPerNm3: idx.wall.glucan_beads_per_nm3, mannanPerProtein: idx.wall.mannan_beads_per_protein } });
       this.workers.push(wk);
     }
@@ -76,9 +81,8 @@ export class TileManager {
   // ---------------------------------------------------------------- desired set
   update(cam: Camera, aspect: number, cutOn: boolean, plane: number[], slab: number, organelle: boolean, heightPx: number) {
     this.frameNo++;
-    if (organelle) return;
+    if (organelle) { this.desired = []; this.desiredSet.clear(); return; }   // surfaces only: nothing to stream (loaded tiles stay cached)
     const eye = cam.eye, fr = cam.frustum(aspect), n = this.idx.n;
-    const R = this.G[0];
     const nn: V3 = [plane[0], plane[1], plane[2]];
     const ext = 100 * (Math.abs(nn[0]) + Math.abs(nn[1]) + Math.abs(nn[2]));
     const cand: { i: number; d: number }[] = [];
@@ -93,11 +97,13 @@ export class TileManager {
         const s = dot(nn, c) - plane[3];
         if (s + ext + MOL_MARGIN < 0 || s - ext - MOL_MARGIN > slab) continue;
       } else {
-        const rc = len(c);
-        if (rc < R - 150 - HALF_DIAG || rc > R + HALF_DIAG) continue;
-        // front hemisphere only (the rest is hidden behind the wall)
-        const toEye = sub(eye, c);
-        if (dot(c, toEye) < -rc * 260) continue;
+        // samples 100 nm apart: every point of the tile is within 87 nm of one (the depth field is clamped
+        // about 180 nm inside the surface, so the tile centre alone cannot tell the shell from the interior)
+        const sr = this.tileShellRange();
+        if (sr[5 * i] > SHELL_DEPTH + 87 || sr[5 * i + 1] < -87 - MOL_MARGIN) continue;
+        // front side only (the rest is hidden behind the wall): the eye at most 300 nm behind the local tangent plane
+        const toEye = sub(eye, c), o = 5 * i + 2;
+        if (sr[o] * toEye[0] + sr[o + 1] * toEye[1] + sr[o + 2] * toEye[2] < -300) continue;
       }
       cand.push({ i, d: len(rel) });
     }
@@ -121,6 +127,24 @@ export class TileManager {
       this.workers[i % this.workers.length].postMessage({ cmd: 'load', idx: i, ix: this.idx.ix[i], iy: this.idx.iy[i], iz: this.idx.iz[i] });
     }
     this.updateDetail(cam, cutOn, plane, slab, heightPx);
+  }
+
+  // per tile: min and max depth below the cell surface over 3x3x3 samples, then the outward surface normal there
+  // (layout [min, max, nx, ny, nz] at 5 * i; zero normal where the field is clamped)
+  tileShellRange(): Float32Array {
+    if (this.shellRange) return this.shellRange;
+    const n = this.idx.n, sr = new Float32Array(5 * n);
+    for (let i = 0; i < n; i++) {
+      const x0 = this.idx.ix[i] * TILE, y0 = this.idx.iy[i] * TILE, z0 = this.idx.iz[i] * TILE;
+      let lo = Infinity, hi = -Infinity;
+      for (let a = 0; a <= 2; a++) for (let b = 0; b <= 2; b++) for (let k = 0; k <= 2; k++) {
+        const d = outerDepth(this.F, this.G, x0 + 100 * a, y0 + 100 * b, z0 + 100 * k);
+        lo = Math.min(lo, d); hi = Math.max(hi, d);
+      }
+      const nrm = outerNormal(this.F, this.G, x0 + 100, y0 + 100, z0 + 100, 60);
+      sr[5 * i] = lo; sr[5 * i + 1] = hi; sr.set(nrm, 5 * i + 2);
+    }
+    return (this.shellRange = sr);
   }
 
   // ---------------------------------------------------------------- procedural detail near the camera

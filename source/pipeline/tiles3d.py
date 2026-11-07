@@ -35,6 +35,7 @@ WALL_DEPTH = 60.0    # wall proteins: outer 60 nm of the wall (mannoprotein laye
 
 
 def tile_list(cell):
+    """tiles intersecting the cell (its enclosing sphere, and with a real outline the outline itself)"""
     R = cell.G[0]
     n = int(np.ceil(R / TILE))
     out = []
@@ -44,6 +45,11 @@ def tile_list(cell):
                 lo = np.array([ix, iy, iz]) * TILE; hi = lo + TILE
                 q = np.clip(0.0, lo, hi)
                 if np.linalg.norm(q) < R:
+                    if c3.n_fields(cell.G) > c3.F_CELL:     # 3x3x3 samples, each within 87 nm of any tile point;
+                        clamp = cell.G[c3.G_N + 1 + 12 * c3.F_CELL + 9]    # the field is exact to `clamp` outside
+                        g = lo + TILE * np.array([[i, j, k] for i in (0, .5, 1) for j in (0, .5, 1) for k in (0, .5, 1)])
+                        if max(c3.outer_depth(p[0], p[1], p[2], cell.G) for p in g) <= -min(clamp - 1.0, 88.0):
+                            continue
                     out.append((ix, iy, iz))
     return out
 
@@ -53,7 +59,7 @@ def tile_name(t):
 
 
 @nb.njit(cache=True)
-def _voxel_regions(lo, n, h, G, pores, pidx, PT, PQ, PC, band_m, band_w, wall_r):
+def _voxel_regions(lo, n, h, G, pores, pidx, PT, PQ, PC, band_m, band_w, wall_depth):
     """label + region membership bits for voxel centres (serial)."""
     lab = np.zeros((n, n, n), np.int8)
     bits = np.zeros((n, n, n), np.int32)
@@ -72,7 +78,7 @@ def _voxel_regions(lo, n, h, G, pores, pidx, PT, PQ, PC, band_m, band_w, wall_r)
                         if abs(out[band_m[b]]) < band_w[b]:
                             bits[i, j, k] |= 1 << b
                 if l == c3.MANNAN or l == c3.GLUCAN:
-                    if np.sqrt(x * x + y * y + z * z) > wall_r:
+                    if out[c3.M_OUTER] < wall_depth:      # label_of filled out
                         bits[i, j, k] |= 1 << 8
     return lab, bits
 
@@ -116,7 +122,7 @@ def tile_geometry(cell, t):
     n = int(TILE / VOX)
     band_m = np.array([BANDS[r][0] for r in BAND_ORDER], np.int64)
     band_w = np.array([BANDS[r][1] for r in BAND_ORDER], np.float64)
-    lab, bits = _voxel_regions(lo, n, VOX, *a, band_m, band_w, cell.G[0] - WALL_DEPTH)
+    lab, bits = _voxel_regions(lo, n, VOX, *a, band_m, band_w, WALL_DEPTH)
     masks = region_masks(lab, bits)
     vol = np.zeros(NREG)
     for r, mm in masks.items():

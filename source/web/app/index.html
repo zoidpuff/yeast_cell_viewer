@@ -98,6 +98,9 @@ details summary { cursor: pointer; color: var(--mut); margin: 4px 0; }
 kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font-size: 11px; }
 .keys { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; }
 #toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; font-size: 12.5px; display: none; z-index: 25; }
+  #legend .modsw { cursor: pointer; border-radius: 3px; }
+  #legend .modsw:hover { background: rgba(255,255,255,0.08); }
+  #legend .modsw.on { background: rgba(255,255,255,0.18); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -143,7 +146,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
 
   <section>
     <div class="h">Display</div>
-    <div class="seg" style="margin-bottom:6px"><button id="modeSection" class="on">Molecules</button><button id="modeOrg">Organelles</button></div>
+    <div class="seg" style="margin-bottom:6px"><button id="modeSection" class="on">Molecules</button><button id="modeOrg">Organelles</button><button id="modeMem" title="The whole cell's membranes in 3D, coloured by compartment (no cut plane)">Membranes</button></div>
     <select id="colorMode">
       <option value="0">Goodsell (compartment palette)</option>
       <option value="1">Structure source: PDB vs AlphaFold</option>
@@ -151,6 +154,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
       <option value="3">Abundance (copies per cell)</option>
       <option value="4">Random per protein type</option>
       <option value="5">Compartment</option>
+      <option value="6">Interaction module (STRING)</option>
     </select>
     <div id="legend"></div>
     <div class="grid2" style="margin-top:6px">
@@ -212,6 +216,7 @@ kbd { background: rgba(255,255,255,0.12); border: 1px solid var(--line); border-
     <div><kbd>[</kbd> <kbd>]</kbd></div><div>Thinner / thicker slab</div>
     <div><kbd>,</kbd> <kbd>.</kbd></div><div>Move plane backward / forward (with <kbd>Alt</kbd>: one Fine step)</div>
     <div><kbd>O</kbd></div><div>Molecules / organelles view</div>
+    <div><kbd>M</kbd></div><div>Membranes view (whole cell, no cut plane)</div>
     <div><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd></div><div>Guided views</div>
     <div><kbd>T</kbd></div><div>Start / stop tour</div>
     <div><kbd>P</kbd></div><div>Screenshot</div>

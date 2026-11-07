@@ -26,14 +26,14 @@ residues in all) are threaded as self-avoiding residue chains from where the 7N9
 reaching into the cytoplasm (checkbox "FG repeats").</li>
 <li><b>mRNA and polysomes:</b> 30,000 full-length mRNAs (lognormal lengths, mean 1.5 kb including UTRs and poly(A);
 40 million nucleotides, one bead per nucleotide) are threaded through the cytosol before the proteins are packed.
-23,000 of them carry 93,000 of the 80S ribosomes (about 4 per mRNA): the mRNA runs through each ribosome's channel
+23,000 of them carry 91,000 of the 80S ribosomes (about 4 per mRNA): the mRNA runs through each ribosome's channel
 (path from PDB 7ZW0), short linkers join neighbouring ribosomes, and the rest of the transcript leaves the first and
 last ribosome as 3&prime; and 5&prime; tails. The other 7,000 mRNAs carry no ribosomes. Threads that run out of room end
 early (86% of the target length is reached overall). Linker DNA joins consecutive nucleosomes.</li>
 <li><b>ER-bound ribosomes:</b> 4,300 ribosomes sit on translocons in the ER and outer nuclear membrane: on the Ssh1 complex
 (yeast ribosome-Ssh1 cryo-EM structure 2WW9) or on Sec61 (7KAH, placed through the shared Sss1 subunit). Their number is
 limited by the free translocon pools (80% assumed ribosome-bound); the PM-facing side of the cortical ER is too narrow for ribosomes.</li>
-<li><b>Microtubules:</b> 21 microtubules (11,500 &alpha;/&beta;-tubulin dimers) grow from &gamma;-tubulin rings on the spindle pole body,
+<li><b>Microtubules:</b> 21 microtubules (11,700 &alpha;/&beta;-tubulin dimers) grow from &gamma;-tubulin rings on the spindle pole body,
 opposite the nucleolus: 16 short kinetochore microtubules whose plus ends anchor the 16 chromosomes (Rabl configuration),
 2 more nuclear ones and 3 cytoplasmic ones about 1 &micro;m long that curve around organelles. The 13-protofilament lattice
 and the ring come from the native yeast &gamma;-TuRC-capped microtubule 8QV3; the lattice dimer is 5W3F (8.3 nm repeat).</li>
@@ -52,7 +52,10 @@ structure 8UXW) and are capped by capping protein (8F8Q), barbed ends toward the
 complexes are free in the cytosol. Assumption: 30% of actin in cables, 30% in patches, the rest monomeric
 (much of it bound to profilin, cofilin or Srv2).</li>
 <li><b>Membranes</b> (plasma membrane, cortical and perinuclear ER, nuclear envelope with pores, vacuole, a reticular
-mitochondrion, Golgi/endosomes, peroxisomes, lipid droplets) are represented by analytic signed-distance fields.
+mitochondrion, Golgi/endosomes, peroxisomes, lipid droplets) are represented by signed-distance fields. The cell
+outline, vacuoles and lipid droplets are those of a cell segmented from a cryo-FIB/SEM volume (EMPIAR-11416, Dumoux
+<i>et al.</i> 2023), the nucleus that of a second cell; the shapes are smoothed, and the vacuoles' thickness along the
+milling direction, which the segmentation loses, is reconstructed.
 Near the camera every lipid is drawn individually. Class composition (Ejsing <i>et al.</i> 2009): PI 20%, PE 15%, PC 14%, PA 8%, PS 2%,
 ergosterol 12%, 0.65 nm² per lipid. Lipids are removed wherever they would overlap a membrane protein.</li>
 <li><b>Cell wall:</b> an inner β-1,3-glucan layer and an outer mannoprotein layer with mannan brushes. Bead counts follow a
@@ -62,13 +65,15 @@ wall mass of about 20% of dry mass.</li>
 <h3>How it was built</h3>
 <p>Proteins were assigned to compartments from UniProt subcellular-location annotations, with GO as fallback. Membrane proteins were oriented by their
 transmembrane segments. Everything was then packed into 200 nm tiles with collision detection on residue-level
-sphere trees. Validation on the final model:</p>
+sphere trees. Placement is not purely random: proteins of the same STRING interaction module are co-enriched in
+domains a few hundred nm across, and about a fifth of all molecules were placed next to an interaction partner predicted
+by AlphaFold 3 or linked in STRING (an assumed, tunable organisation; see Model details). Validation on the final model:</p>
 <ul>
-<li>Bead clash rate 1.4×10⁻⁶.</li>
-<li>Containment violations 4.3×10⁻⁵.</li>
+<li>Bead clash rate 1.9×10⁻⁶.</li>
+<li>Containment violations 5.6×10⁻⁵.</li>
 <li>Macromolecule densities (protein plus the RNA of ribosomes and tRNAs and the DNA of nucleosomes; lipids and small
-molecules not counted): cytosol 89 mg/mL (67 protein + 22 RNA), nucleoplasm 62 mg/mL, mitochondrial matrix 112 mg/mL.</li>
-<li>99.8% of requested copies were placed outside mitochondria.</li>
+molecules not counted): cytosol 93 mg/mL (70 protein + 23 RNA), nucleoplasm 56 mg/mL, mitochondrial matrix 111 mg/mL.</li>
+<li>99.9% of requested copies were placed outside mitochondria.</li>
 </ul>
 <p>Positions are stored to 0.0055 nm and orientations to 0.004°.</p>
 
@@ -91,6 +96,6 @@ compartment backgrounds and Goodsell-style outlines. Full-atom models are fetche
 when you request them.</p>
 <p style="color:#a9a69e">Data sources: RCSB Protein Data Bank (CC0) and the individual entries named above; AlphaFold Protein Structure
 Database monomers and predicted complexes (CC-BY 4.0, Jumper <i>et al.</i> 2021; Varadi <i>et al.</i> 2024); PaxDb protein abundances;
-Complex Portal; UniProt and Gene Ontology annotations; IntAct interactions; Alliance of Genome Resources paralogs;
+Complex Portal; UniProt and Gene Ontology annotations; IntAct interactions; STRING v12 associations (CC-BY 4.0); EMPIAR-11416 cryo-FIB/SEM volume (CC0); Alliance of Genome Resources paralogs;
 lipid composition from Ejsing <i>et al.</i> 2009; total protein from Ho <i>et al.</i> 2018.</p>
 `;

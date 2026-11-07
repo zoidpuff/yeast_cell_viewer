@@ -1,12 +1,15 @@
 """Stage 3: expected totals per (library type, region), NPC + microtubule + chromatin + actin cable + polysome pre-pass, distribution over tiles,
 checkerboard-phased parallel tile packing. Notebook cells 27-29.
 
-  python s3_pack.py                      # from s1 inventory + s2 geometry
+  python s3_pack.py                      # from s1 inventory + s2 geometry, with the organisation layer (organisation.py)
+  python s3_pack.py --random             # the same with uniform random placement
   python s3_pack.py --from-intermediates DIR
-        # re-pack the shipped model: reuse DIR/{tile_counts.parquet, prepass.npz, mrna_counts.npy, libpack_meta.npz}
+        # re-pack the shipped model: reuse DIR/{tile_counts.parquet, prepass.npz, mrna_counts.npy, libpack_meta.npz,
+        # partners.npz (organisation layer; absent: uniform placement)}
 """
 import argparse, shutil
 from _common import *
+import organisation as og
 import cell3d as c3, tiles3d as t3, pack3d as p3, wc3d, polysome as ps, cytoskeleton as cs, microtubules as mt, actin_patches as patches, mrna, atp_dimers as atp, fg_mesh as fgm, inventory as inv
 
 
@@ -22,7 +25,9 @@ def consume(exp3, ing_ids, n):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--from-intermediates")
+    ap.add_argument("--random", action="store_true", help="uniform random placement (no organisation layer)")
     args = ap.parse_args()
+    org = org_prm = None
     cell = c3.Cell.load(f"{C.W3D}/geometry.json")
     tiles = canonical_tiles()
     measure = pd.read_parquet(f"{C.W3D}/tile_measure.parquet")
@@ -37,6 +42,10 @@ def main():
         pre = dict(np.load(f"{d}/prepass.npz"))
         for k in ("li_npc", "li_nuc"): pre[k] = int(pre[k])
         exp3 = None
+        if os.path.exists(f"{d}/partners.npz") and not args.random:      # organisation layer of the shipped build
+            z = np.load(f"{d}/partners.npz")
+            assert [str(x) for x in z["ids"]] == [str(x) for x in lp["ids"]]
+            org = {k: z[k] for k in ("off", "idx", "strength", "kind")}; org_prm = og.params()
     else:
         ing, oligo_map = load_inventory()
         exp3 = wc3d.expected_totals(ing, oligo_map)
@@ -113,7 +122,13 @@ def main():
                         obstacles=(np.concatenate([OC, MC, FGC]), np.concatenate([OR, MR, FGR])), log=log)
         pre.update(poly)
         exp3.loc[rib, "expected"] = exp3.loc[rib, "expected"] - len(poly["poly_pos"])
-        counts = wc3d.distribute(exp3, measure, {k: i for i, k in enumerate(lp["ids"])})
+        logmod = None
+        if not args.random:
+            centres = (np.array(tiles, float) + 0.5) * t3.TILE
+            logmod, org = og.build(exp3, ing, [str(x) for x in lp["ids"]], centres, log=log)
+            org_prm = og.params()
+        vol = {str(k): float((4 / 3 * np.pi * lp["STR"][lp["st_off"][i]:lp["st_off"][i + 1]] ** 3).sum()) for i, k in enumerate(lp["ids"])}
+        counts = wc3d.distribute(exp3, measure, {k: i for i, k in enumerate(lp["ids"])}, logmod=logmod, vol=vol)
         # full-length mRNAs, threaded before packing: polysome tails + free transcripts (one mRNA per polysome)
         from scipy.spatial.transform import Rotation
         import structlib as sl
@@ -139,7 +154,7 @@ def main():
     if exp3 is not None:
         exp3.to_parquet(f"{C.W3D}/expected_totals.parquet")
 
-    wc3d.setup_shared(cell, lp, counts, tiles, pre, halo)
+    wc3d.setup_shared(cell, lp, counts, tiles, pre, halo, partners=org, prm=org_prm)
     shutil.rmtree(wc3d.RAW, ignore_errors=True); os.makedirs(wc3d.RAW)
     phase = np.array([wc3d.phase_of(t) for t in tiles])
     allres = []; T0 = time.time()
@@ -149,10 +164,11 @@ def main():
         allres += r
         log(f"phase {ph}: {len(ids)} tiles, {time.time() - t0:.0f}s, placed {sum(x[2] for x in r)}/{sum(x[1] for x in r)}, "
             f"overflow {sum(x[3] for x in r)}")
-    res = pd.DataFrame(allres, columns=["ti", "requested", "placed", "overflow", "sec", "n_mrna"])
+    res = pd.DataFrame(allres, columns=["ti", "requested", "placed", "overflow", "sec", "n_mrna", "attract_tried", "attract_placed"])
     res.to_parquet(f"{C.W3D}/pack_summary.parquet")
     log(f"total {time.time() - T0:.0f}s; placed {res.placed.sum() / 1e6:.2f}M / {res.requested.sum() / 1e6:.2f}M "
-        f"= {res.placed.sum() / res.requested.sum():.4f}")
+        f"= {res.placed.sum() / res.requested.sum():.4f}; next to a partner {res.attract_placed.sum() / 1e6:.2f}M "
+        f"of {res.attract_tried.sum() / 1e6:.2f}M that tried")
 
 
 if __name__ == "__main__":

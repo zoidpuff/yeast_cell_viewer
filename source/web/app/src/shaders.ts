@@ -21,11 +21,12 @@ struct U {
   lod: vec4f,             // x L0 bead px, y L1 instance px, z min px for free spheres/lipids, w protein bead radius
   vp: vec4f,              // width, height, 1/w, 1/h
   frustum: array<vec4f, 6>,  // camera-relative planes, inside: dot(n,p)+w >= 0
-  modes: vec4u,           // x colorMode, y regionMask, z unused, w highlightActive
+  modes: vec4u,           // x colorMode, y regionMask, z hidden free-sphere kinds, w highlightActive
   sel: vec4u,             // x selected id, y selected type+1, z shaded(1), w organelle mode
   misc: vec4f,            // x QSTEP, y nucleic bead radius, z outline strength, w dpr
   cell: vec4f,            // x R outer, y R mannan inner, z R PM, w near
-  caps: vec4u,            // x capL0 (offset of L1 items in list01), y motion amount x 1000, z motion cap nm x 1000
+  caps: vec4u,            // x capL0 (offset of L1 items in list01), y motion amount x 1000, z motion cap nm x 1000,
+                          // w membranes-only view (whole-cell surfaces, palette 66 + membrane, no cut)
 };
 @group(0) @binding(0) var<uniform> u: U;
 
@@ -53,7 +54,8 @@ struct TypeInfo {
   beadOff: u32, beadCount: u32, clusterOff: u32, clusterCount: u32,
   stOff: u32, stCount: u32, br: f32, req: f32,
   color0: u32, color1: u32, flags: u32, plddt: f32,
-  modeOff: u32, coefOff: u32, nConf: u32, pad: u32,   // pool-ensemble motion modes (nConf 0: none)
+  modeOff: u32, coefOff: u32, nConf: u32,             // pool-ensemble motion modes (nConf 0: none)
+  modColor: u32,                                       // packed colour of the STRING interaction module (0: none)
 };
 struct Inst { t: u32, region: u32, flags: u32, p: vec3f, q: vec4f, seed: u32 };
 @group(0) @binding(1) var<storage, read> inst: array<vec4u>;
@@ -331,11 +333,16 @@ fn shadeFrag(in: VOut) -> FOut {
   let clip = u.proj * vec4f(p, 1.0);
   o.depth = clip.z / clip.w;
   var shade = 1.0;
+  // spheres a few pixels wide show only their bright, front-facing centre: fade to the sphere's mean shade there,
+  // so residue beads (L0) are not lighter than the larger spheres of the coarser levels at the LOD boundary
+  let rpx = in.radius * u.eye.w / max(length(in.center), 1e-3);
+  let sharp = smoothstep(0.75, 3.0, rpx);
   if (u.sel.z == 1u) {
     let l = normalize(vec3f(0.35, 0.45, 1.0));
     shade = 0.45 + 0.55 * max(dot(nrm, l), 0.0) + 0.12 * pow(max(nrm.z, 0.0), 8.0);
+    shade = mix(0.80, shade, sharp);       // mean over the projected disc: n.l ~ 2/3 l.z, pow(n.z, 8) ~ 1/5
   } else {
-    shade = 0.93 + 0.07 * max(nrm.z, 0.0);
+    shade = mix(0.977, 0.93 + 0.07 * max(nrm.z, 0.0), sharp);
   }
   if (cap) { shade = 0.9; }
   o.color = vec4f(in.color * shade, 1.0);
@@ -388,6 +395,9 @@ fn instColor(I: Inst, T: TypeInfo, kind: u32, plddt: f32, id: u32) -> vec3f {
     c = viridis(log(max(f32(T.flags >> 8u), 1.0)) / log(10.0) / 6.0);
   } else if (mode == 4u) {   // random per type
     c = hsv2rgb(hj, 0.55, 0.92);
+  } else if (mode == 6u) {   // STRING interaction module
+    if (T.modColor != 0u) { c = unpackColor(T.modColor); } else { c = vec3f(0.82, 0.82, 0.80); }
+    if (kind == 1u) { c = c * 0.8; }
   } else {                    // compartment only
     c = palette[I.region].xyz;
   }
@@ -555,7 +565,7 @@ fn fsMain(in: VOut) -> FOut { return shadeFrag(in); }
 // ---------------------------------------------------------------- membrane meshes (per tile, or organelle overview)
 export const DRAW_MESH = COMMON + /* wgsl */ `
 @group(0) @binding(5) var<storage, read> palette: array<vec4f>;
-struct MP { slot: u32, organelle: u32, offset0: f32, offset1: f32 };
+struct MP { slot: u32, organelle: u32, offset0: f32, offset1: f32 };   // organelle: 0 tile, 1 organelle mode, 2 under lipids, 3 membranes only
 @group(1) @binding(0) var<uniform> mp: MP;
 struct VOut {
   @builtin(position) pos: vec4f,
@@ -579,16 +589,19 @@ struct FOut { @location(0) color: vec4f, @location(1) id: u32 };
 @fragment
 fn fsMesh(in: VOut, @builtin(front_facing) ff: bool) -> FOut {
   var o: FOut;
+  let outside = !ff;      // membrane triangles are wound inward (tiles3d marching cubes): the outside is the back face
+  // membranes only: the plasma membrane is seen from inside (its outside dropped) so the organelles show through it
+  if (mp.organelle == 3u && ((in.mem == 0u && outside) || in.mem == 9u)) { discard; }
   if (u.cut.x > 0.5) {
     let s = sPlaneW(in.prel);
     if (s < 0.0 || (mp.organelle != 1u && s > u.cut.y)) { discard; }
   }
   let vn = normalize((u.view * vec4f(in.nrm, 0.0)).xyz);
-  var c = palette[40u].xyz;
-  if (mp.organelle == 1u) { c = palette[56u + in.mem].xyz; } else if (mp.organelle == 2u) { c = palette[41u].xyz; }
+  var c = palette[41u].xyz;
+  if (mp.organelle == 1u) { c = palette[56u + in.mem].xyz; } else if (mp.organelle == 3u) { c = palette[66u + in.mem].xyz; }
   let l = abs(vn.z);
   var shade = 0.82 + 0.18 * l;
-  if (mp.organelle == 1u) { shade = 0.55 + 0.45 * l; if (!ff) { shade *= 0.8; } }
+  if (mp.organelle == 1u || mp.organelle == 3u) { shade = 0.55 + 0.45 * l; if (!outside) { shade *= 0.8; } }
   o.color = vec4f(c * shade, 1.0);
   o.id = 0x80000000u | (mp.slot << 5u) | (in.mem << 1u) | in.leaf;
   return o;
@@ -599,13 +612,15 @@ fn fsMesh(in: VOut, @builtin(front_facing) ff: bool) -> FOut {
 export const FILL = COMMON + /* wgsl */ `
 @group(0) @binding(5) var<storage, read> palette: array<vec4f>;
 struct Prim { q0: vec4f, q1: vec4f, tc: vec4u };      // type, class
-struct Geo { G0: vec4f, G1: vec4f, G2: vec4f, consts: vec4f, grid: vec4f };   // consts: PORE_R, PERI_W, IMS_W, nPores
+struct Geo { G0: vec4f, G1: vec4f, G2: vec4f, consts: vec4f, grid: vec4f,       // consts: PORE_R, PERI_W, IMS_W, nPores
+             nax: vec4f, nr0: vec4f, nr1: vec4f, nr2: vec4f };                    // nucleus semi-axes, rotation rows
 @group(1) @binding(0) var<storage, read> prims: array<Prim>;
-@group(1) @binding(1) var<storage, read> pores: array<vec4f>;
+@group(1) @binding(1) var<storage, read> pores: array<vec4f>;      // per pore: centre (perinuclear midsurface), NE normal
 @group(1) @binding(2) var<storage, read> gridOff: array<u32>;   // prim list offsets (n^3+1) then pore list offsets
 @group(1) @binding(3) var<storage, read> gridIdx: array<u32>;
 @group(1) @binding(4) var<uniform> geo: Geo;
-@group(1) @binding(5) var<storage, read> tileState: array<u32>;   // 22^3, bit0 = molecules loaded
+@group(1) @binding(5) var<storage, read> tileState: array<u32>;   // 26^3 (data.TGRID), bit0 = molecules loaded
+@group(1) @binding(6) var<storage, read> fields: array<f32>;       // real-shape distance fields (fields.ts layout)
 
 const NMEM: u32 = 10u;
 fn sdfPrim(p: vec3f, pr: Prim) -> f32 {
@@ -630,6 +645,62 @@ fn sdfPrim(p: vec3f, pr: Prim) -> f32 {
   return sqrt(s * s + dr * dr) - q1.z;
 }
 struct Mem { d: array<f32, 10>, matrix: f32, cell: u32 };
+// distance field k (cell3d.field_sdf): trilinear inside a stored brick, +-clamp elsewhere
+fn fieldSdf(p: vec3f, k: u32) -> f32 {
+  let o = 1u + 12u * k; let h = fields[o + 3u]; let B = u32(fields[o + 7u]);
+  let f = (p - vec3f(fields[o], fields[o + 1u], fields[o + 2u])) / h;
+  let nb = vec3u(u32(fields[o + 4u]), u32(fields[o + 5u]), u32(fields[o + 6u]));
+  if (any(f < vec3f(0.0)) || any(f >= vec3f(nb * B))) { return fields[o + 9u]; }
+  let ii = vec3u(floor(f)); let bb = ii / B;
+  let bi = i32(fields[u32(fields[o + 10u]) + (bb.x * nb.y + bb.y) * nb.z + bb.z]);
+  if (bi == -1) { return -fields[o + 8u]; }
+  if (bi == -2) { return fields[o + 9u]; }
+  let n1 = B + 1u; let sx = n1 * n1; let sy = n1;
+  let t = f - vec3f(ii); let l = ii - bb * B;
+  let b = u32(fields[o + 11u]) + u32(bi) * n1 * n1 * n1 + (l.x * n1 + l.y) * n1 + l.z;
+  let c00 = mix(fields[b], fields[b + sx], t.x); let c01 = mix(fields[b + 1u], fields[b + sx + 1u], t.x);
+  let c10 = mix(fields[b + sy], fields[b + sx + sy], t.x); let c11 = mix(fields[b + sy + 1u], fields[b + sx + sy + 1u], t.x);
+  return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
+}
+// depth below the outer cell surface (negative outside)
+fn outerDepth(p: vec3f) -> f32 {
+  if (fields[0] > 0.5) { return -fieldSdf(p, 0u); }
+  return geo.G0.x - length(p);
+}
+// cortical-ER patch: a sheet at constant depth below the plasma membrane (pm: signed PM distance, cell3d.sdf_cer)
+fn sdfCer(p: vec3f, pr: Prim, pm: f32) -> f32 {
+  let r = length(p);
+  let c = clamp(dot(p, pr.q0.xyz) / max(r, 1e-9), -1.0, 1.0);
+  let s = max(acos(c) - pr.q1.x, 0.0) * r;
+  let dr = (geo.G0.z - pr.q1.y) - pm;
+  return sqrt(s * s + dr * dr) - pr.q1.z;
+}
+fn nucSdf(p: vec3f) -> f32 {
+  if (fields[0] > 2.5) { return fieldSdf(p, 2u); }
+  return nucEllipsoid(p);
+}
+// signed distance to the ONM midsurface (ellipsoid), first-order approximation as in cell3d.nuc_sdf
+fn nucEllipsoid(p: vec3f) -> f32 {
+  let v = p - vec3f(geo.G0.w, geo.G1.x, geo.G1.y);
+  let l = vec3f(dot(geo.nr0.xyz, v), dot(geo.nr1.xyz, v), dot(geo.nr2.xyz, v)) / geo.nax.xyz;
+  let k0 = length(l); let k1 = length(l / geo.nax.xyz);
+  if (k1 < 1e-12) { return -min(geo.nax.x, min(geo.nax.y, geo.nax.z)); }
+  return k0 * (k0 - 1.0) / k1;
+}
+// pore whose axis (through its centre along the NE normal) passes within rc of p: returns rho, or -1
+fn poreRho(p: vec3f, cell: u32, rc: f32) -> f32 {
+  let n3 = u32(geo.grid.x * geo.grid.x * geo.grid.x);
+  let po0 = gridOff[n3 + 1u + cell]; let po1 = gridOff[n3 + 1u + cell + 1u];
+  for (var k = po0; k < po1; k++) {
+    let i = gridIdx[k];
+    let v = p - pores[2u * i].xyz; let nn = pores[2u * i + 1u].xyz;
+    let z = dot(v, nn);
+    if (abs(z) > 150.0) { continue; }
+    let rho = length(v - z * nn);
+    if (rho < rc) { return rho; }
+  }
+  return -1.0;
+}
 fn gridCell(p: vec3f) -> u32 {
   let n = u32(geo.grid.x); let ext = geo.grid.y; let h = 2.0 * ext / f32(n);
   let g = clamp(vec3i(floor((p + vec3f(ext)) / h)), vec3i(0), vec3i(i32(n) - 1));
@@ -639,31 +710,26 @@ fn memSdfs(p: vec3f) -> Mem {
   var m: Mem;
   let G = geo;
   let PERI = G.consts.y; let PORE_R = G.consts.x;
-  let r = length(p);
-  m.d[0] = G.G0.z - r;     // PM
-  m.d[9] = G.G0.x - r;     // outer
-  let v = p - vec3f(G.G0.w, G.G1.x, G.G1.y);
-  let dn = length(v);
-  let hp = dn - (G.G1.z - 0.5 * PERI);
+  let dep = outerDepth(p);
+  m.d[0] = dep - (G.G0.x - G.G0.z);     // PM
+  m.d[9] = dep;                         // outer
+  let hp = nucSdf(p) + 0.5 * PERI;
   var d = abs(hp) - 0.5 * PERI;
   let rc = PORE_R + 0.5 * PERI;
   let cell = gridCell(p); m.cell = cell;
-  let n3 = u32(geo.grid.x * geo.grid.x * geo.grid.x);
-  let po0 = gridOff[n3 + 1u + cell]; let po1 = gridOff[n3 + 1u + cell + 1u];
-  for (var k = po0; k < po1; k++) {
-    let pd = pores[gridIdx[k]].xyz;
-    let z = dot(v, pd);
-    if (z <= 0.0) { continue; }
-    let rho = length(v - z * pd);
-    if (rho < rc) { d = sqrt((rho - rc) * (rho - rc) + hp * hp) - 0.5 * PERI; break; }
+  if (abs(hp) < rc + PERI) {
+    let rho = poreRho(p, cell, rc);
+    if (rho >= 0.0) { d = sqrt((rho - rc) * (rho - rc) + hp * hp) - 0.5 * PERI; }
   }
   m.d[2] = d;
   m.d[1] = 1e9; m.d[3] = 1e9; m.d[4] = 1e9; m.d[6] = 1e9; m.d[7] = 1e9; m.d[8] = 1e9;
+  if (fields[0] > 1.5) { m.d[3] = fieldSdf(p, 1u); }
   var im = 1e9; var cr = 1e9;
   let o0 = gridOff[cell]; let o1 = gridOff[cell + 1u];
   for (var k = o0; k < o1; k++) {
     let pr = prims[gridIdx[k]];
-    let dd = sdfPrim(p, pr);
+    var dd: f32;
+    if (pr.tc.x == 3u) { dd = sdfCer(p, pr, m.d[0]); } else { dd = sdfPrim(p, pr); }
     let c = pr.tc.y;
     if (c == 7u) { m.d[1] = min(m.d[1], dd); }
     else if (c == 0u) { m.d[3] = min(m.d[3], dd); }
@@ -681,33 +747,19 @@ fn memSdfs(p: vec3f) -> Mem {
 // labels: 0 EXT,1 MANNAN,2 GLUCAN,3 CYTO,4 CER,5 PERI,6 NUCP,7 NUCL,8 VAC,9 IMS,10 MATRIX,11 LD,12 GOLGI,13 PEROX,14 PORE
 fn labelOf(p: vec3f, m: Mem) -> u32 {
   let G = geo; let PERI = G.consts.y; let PORE_R = G.consts.x;
-  let r = length(p);
-  if (r > G.G0.x) { return 0u; }
-  if (r > G.G0.y) { return 1u; }
-  if (r > G.G0.z) { return 2u; }
+  if (m.d[9] < 0.0) { return 0u; }
+  if (m.d[9] < G.G0.x - G.G0.y) { return 1u; }
+  if (m.d[0] < 0.0) { return 2u; }
   if (m.d[1] < 0.0) { return 4u; }
   if (m.d[2] < 0.0) { return 5u; }
-  let v = p - vec3f(G.G0.w, G.G1.x, G.G1.y);
-  let dn = length(v);
-  if (dn < G.G1.z - 0.5 * PERI) {
-    let hp = dn - (G.G1.z - 0.5 * PERI);
-    let rc = PORE_R + 0.5 * PERI;
-    if (hp > -0.5 * PERI - 8.0) {
-      let n3 = u32(geo.grid.x * geo.grid.x * geo.grid.x);
-      let po0 = gridOff[n3 + 1u + m.cell]; let po1 = gridOff[n3 + 1u + m.cell + 1u];
-      for (var k = po0; k < po1; k++) {
-        let pd = pores[gridIdx[k]].xyz;
-        let z = dot(v, pd);
-        if (z <= 0.0) { continue; }
-        let rr = v - z * pd;
-        if (dot(rr, rr) < rc * rc) { return 14u; }
-      }
-    }
+  let ns = nucSdf(p);
+  if (ns < -0.5 * PERI) {
+    if (ns > -PERI - 8.0 && poreRho(p, m.cell, PORE_R + 0.5 * PERI) >= 0.0) { return 14u; }
     let w = p - vec3f(G.G1.w, G.G2.x, G.G2.y);
-    if (dn < G.G1.z - PERI && dot(w, w) < G.G2.z * G.G2.z) { return 7u; }
+    if (ns < -PERI && dot(w, w) < G.G2.z * G.G2.z) { return 7u; }
     return 6u;
   }
-  if (dn < G.G1.z) { return 14u; }
+  if (ns < 0.0) { return 14u; }
   if (m.d[4] < 0.0) { if (m.matrix < 0.0) { return 10u; } return 9u; }
   if (m.d[3] < 0.0) { return 8u; }
   if (m.d[8] < 0.0) { return 11u; }
@@ -716,9 +768,9 @@ fn labelOf(p: vec3f, m: Mem) -> u32 {
   return 3u;
 }
 fn tileLoaded(p: vec3f) -> bool {
-  let g = vec3i(floor(p / 200.0)) + vec3i(11);
-  if (any(g < vec3i(0)) || any(g > vec3i(21))) { return false; }
-  return (tileState[(u32(g.x) * 22u + u32(g.y)) * 22u + u32(g.z)] & 1u) != 0u;
+  let g = vec3i(floor(p / 200.0)) + vec3i(13);
+  if (any(g < vec3i(0)) || any(g > vec3i(25))) { return false; }
+  return (tileState[(u32(g.x) * 26u + u32(g.y)) * 26u + u32(g.z)] & 1u) != 0u;
 }
 
 struct VO { @builtin(position) pos: vec4f, @location(0) ndc: vec2f };
@@ -740,15 +792,19 @@ fn shadeLabel(p: vec3f, o: ptr<function, FOut>, bands: bool) {
     for (var k = 0u; k < 9u; k++) {
       let d = m.d[k];
       if (k == 8u) {           // lipid droplet: phospholipid monolayer on the outside of the neutral-lipid core
-        if (d > -2.0 && d < 0.0) { c = select(palette[41u].xyz, palette[40u].xyz, d > -0.9); id = 0x200u + k; }
+        if (d > -2.0 && d < 0.0) { c = palette[41u].xyz; id = 0x200u + k; }
         continue;
       }
-      let a = abs(d);
-      if (a < 2.5) { c = select(palette[41u].xyz, palette[40u].xyz, a > 1.35); id = 0x200u + k; }
+      if (abs(d) < 2.5) { c = palette[41u].xyz; id = 0x200u + k; }
     }
   }
   (*o).color = vec4f(c, 1.0);
   (*o).id = id;
+}
+
+fn fillDepth(pv0: vec3f) -> f32 {
+  let clip = u.proj * vec4f((u.view * vec4f(pv0, 1.0)).xyz, 1.0);
+  return clamp(clip.z / clip.w, 0.0, 1.0);
 }
 
 @fragment
@@ -758,17 +814,18 @@ fn fsFill(in: VO) -> FOut {
   let rd = normalize(pw.xyz / pw.w);
   let eye = u.eye.xyz;
   let R = u.cell.x;
-  // ray vs outer cell sphere (centre at origin in world)
+  // ray vs the enclosing sphere of the cell (centre at origin in world)
   let b = dot(rd, eye);
   let c = dot(eye, eye) - R * R;
   let h = b * b - c;
   o.color = vec4f(palette[80u].xyz, 1.0); o.id = 0u; o.depth = 0.0;
-  if (h < 0.0) { return o; }
+  if (h < 0.0 || u.caps.w == 1u) { return o; }      // no ray hit, or the membranes-only view (meshes only)
   let sh = sqrt(h);
   var t0 = max(-b - sh, 0.0);
   let t1 = -b + sh;
   if (t1 <= 0.0) { return o; }
   var onCut = false;
+  var tEnd = t1;          // the exterior trace ends here (where the ray leaves the cell or enters the removed half)
   if (u.cut.x > 0.5) {
     let dn = dot(u.plane.xyz, rd);
     let sE = u.planeV.w;
@@ -776,35 +833,67 @@ fn fsFill(in: VO) -> FOut {
     else {
       let tp = -sE / dn;
       if (dn > 0.0) { if (tp > t1) { return o; } if (tp > t0) { t0 = tp; onCut = true; } }
-      else { if (tp < t0) { return o; } }
+      else { if (tp < t0) { return o; } tEnd = min(t1, tp); }
     }
     if (u.sel.w == 1u) {
       // organelle mode: cut face only (meshes provide the rest)
       if (!onCut) { o.color = vec4f(palette[80u].xyz, 1.0); return o; }
     }
-  } else if (u.sel.w == 0u) {
-    if (c < 0.0) { return o; }      // camera inside the cell without a cut: nothing analytic to show
   }
-  var t = t0 + select(0.5, 0.0, onCut);
+  var t = t0;
   var p = eye + rd * t;
-  var bands = true;
-  if (u.sel.w == 0u && tileLoaded(p)) {
-    // molecules are drawn here: show the compartment backdrop behind the visible slab
-    if (onCut) { t = t + u.cut.y / max(dot(u.plane.xyz, rd), 0.05); }
-    else { t = t + 140.0; }
-    if (t >= t1) { o.color = vec4f(palette[80u].xyz, 1.0); return o; }
+  if (onCut && outerDepth(p) >= 0.0) {
+    if (u.sel.w == 0u && tileLoaded(p)) {
+      // molecules are drawn here: show the compartment backdrop behind the visible slab
+      t = t + u.cut.y / max(dot(u.plane.xyz, rd), 0.05);
+      if (t >= t1) { return o; }
+      p = eye + rd * t;
+    }
+    shadeLabel(p, &o, true);
+    o.depth = fillDepth(rd * t);
+    return o;
+  }
+  // exterior: the outer cell surface, found by sphere tracing the (clamped) distance field; with a cut it is also
+  // what lies beyond a cut point outside the real outline (but inside the enclosing sphere)
+  if (onCut && u.sel.w == 1u) { return o; }      // organelle mode: the meshes show it
+  if (!onCut && outerDepth(eye) > 0.0) { return o; }   // camera inside the cell without a cut: nothing analytic to show
+  for (var k = 0; k < 128; k++) {
+    let d = -outerDepth(p);
+    if (d < 0.25) { break; }
+    t = t + max(d, 0.5);
+    if (t >= tEnd) { return o; }
     p = eye + rd * t;
   }
-  shadeLabel(p, &o, bands);
-  let pv = (u.view * vec4f(rd * t, 1.0)).xyz;
-  let clip = u.proj * vec4f(pv, 1.0);
-  o.depth = clamp(clip.z / clip.w, 0.0, 1.0);
-  if (!onCut && u.cut.x < 0.5) {
-    // outer surface: gentle sphere shading
-    let nn = normalize(p);
-    let vn = (u.view * vec4f(nn, 0.0)).xyz;
-    o.color = vec4f(o.color.xyz * (0.75 + 0.25 * max(vn.z, 0.0)), 1.0);
+  let ps = p;
+  if (u.sel.w == 0u && tileLoaded(p) && (u.cut.x < 0.5 || dot(u.plane.xyz, p) - u.plane.w < u.cut.y)) {
+    // wall molecules (mannoproteins, mannan) are drawn: the backdrop is the top of the glucan layer, at constant depth
+    // below the surface, so the view does not depend on the viewing angle; grazing rays that miss it see background
+    let D = u.cell.x - u.cell.y;
+    for (var k = 0; k < 64; k++) {
+      let d = D - outerDepth(p);
+      if (d < 0.25) { break; }
+      t = t + max(d, 0.5);
+      if (t >= tEnd) { return o; }
+      p = eye + rd * t;
+    }
   }
+  // one wall colour, lit like the molecules by the smoothed surface normal (no compartment labels or membrane
+  // bands: those are cut-face features, and on a traced surface they would trace contours of the field's noise)
+  let e = 10.0;
+  let g = vec3f(outerDepth(ps + vec3f(e, 0.0, 0.0)) - outerDepth(ps - vec3f(e, 0.0, 0.0)),
+                outerDepth(ps + vec3f(0.0, e, 0.0)) - outerDepth(ps - vec3f(0.0, e, 0.0)),
+                outerDepth(ps + vec3f(0.0, 0.0, e)) - outerDepth(ps - vec3f(0.0, 0.0, e)));
+  var nn = normalize(ps);
+  if (dot(g, g) > 1e-6) { nn = -normalize(g); }
+  let vn = (u.view * vec4f(nn, 0.0)).xyz;
+  var shade = 0.93 + 0.07 * max(vn.z, 0.0);
+  if (u.sel.z == 1u) {
+    let l = normalize(vec3f(0.35, 0.45, 1.0));
+    shade = 0.5 + 0.5 * max(dot(vn, l), 0.0) + 0.06 * pow(max(vn.z, 0.0), 8.0);
+  }
+  o.color = vec4f(palette[82u].xyz * shade, 1.0);
+  o.id = 0x101u;
+  o.depth = fillDepth(rd * t);
   return o;
 }
 `;

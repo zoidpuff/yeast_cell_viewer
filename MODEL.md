@@ -51,10 +51,13 @@ Lipids and the cell-wall polysaccharides are drawn in the viewer but generated p
 
 ### 3.1 Volumes
 
-The cell is a sphere of 42 µm³ (mean log-phase volume; Jorgensen *et al.* 2002) with a 110 nm cell wall, the lower bound of 110–200 nm (Orlean 2012).
+The cell is 42 µm³ (mean log-phase volume; Jorgensen *et al.* 2002) with a 110 nm cell wall, the lower bound of 110–200 nm (Orlean 2012). Its outline, nucleus and vacuoles are real segmented shapes (section 3.3).
 
 Organelle volume fractions:
-- **Nucleus, vacuole and lipid droplets:** soft X-ray tomography (Uchida *et al.* 2011): nucleus 7%, vacuole 7%, lipid droplets 1%. The nucleolus is 20% of the nucleus.
+- **Nucleus, vacuole and lipid droplets:** from segmented cryo-FIB/SEM cells (EMPIAR-11416; Dumoux *et al.* 2023; section 3.3), set against the literature:
+  - **Nucleus 8%.** The two segmented nuclei are 8.0% and 9.7% of their cells (both from cells cut by the edge of the imaged volume, which biases the fraction up). Fluorescence gives about 7% (Jorgensen *et al.* 2007) and serial-section EM 10.5% (Yamaguchi *et al.* 2011). The nucleolus is 20% of the nucleus (Uchida *et al.* 2011).
+  - **Vacuole 9%.** The median of five segmented cells (6–13%). The segmentation misses faint vacuoles, so this is a lower bound; soft X-ray tomography gave 7% (Uchida *et al.* 2011).
+  - **Lipid droplets 0.34%.** The 14 segmented droplets of the cell whose outline is used (the five cells range 0.3–0.8%, from the depositors' hand-corrected labels); soft X-ray tomography gave 1%.
 - **Mitochondria:** raised from the measured 1% to 2%. The assumption is that X-ray tomography under-segments thin tubules. At 1%, the mitochondrial proteome would imply about 480 mg/mL of protein.
 - **Golgi, endosomes and peroxisomes:** 1% together (assumption).
 - **Cortical ER:** covers 48% of the plasma membrane (Wolf *et al.* 2012).
@@ -63,19 +66,19 @@ Measured on the final voxelised geometry (4 nm grid):
 
 | Compartment | Volume (µm³) | Share of cell |
 |---|---|---|
-| Cytosol | 27.81 | 66.2% |
-| Cell wall (glucan 4.09, mannan 2.01) | 6.10 | 14.5% |
-| Vacuole | 2.94 | 7.0% |
-| Nucleoplasm | 2.02 | 4.8% |
-| Nucleolus | 0.59 | 1.4% |
-| Mitochondrial matrix | 0.61 | 1.5% |
+| Cytosol | 26.62 | 63.5% |
+| Cell wall (glucan 4.23, mannan 2.09) | 6.32 | 15.1% |
+| Vacuole (13 compartments) | 3.75 | 8.9% |
+| Nucleoplasm | 2.26 | 5.4% |
+| Nucleolus | 0.67 | 1.6% |
+| Mitochondrial matrix | 0.59 | 1.4% |
 | Mitochondrial intermembrane space (incl. crista lumen) | 0.24 | 0.6% |
-| ER lumen: cortical ER | 0.50 | 1.2% |
-| ER lumen: perinuclear space | 0.29 | 0.7% |
-| Lipid droplets | 0.42 | 1.0% |
+| ER lumen: cortical ER | 0.53 | 1.3% |
+| ER lumen: perinuclear space | 0.36 | 0.9% |
+| Lipid droplets (14) | 0.14 | 0.3% |
 | Golgi / endosomes | 0.34 | 0.8% |
 | Peroxisomes | 0.08 | 0.2% |
-| **Total** | **41.98** | |
+| **Total** (incl. 0.04 µm³ of pore channels) | **41.93** | |
 
 ### 3.2 Membranes
 
@@ -83,34 +86,48 @@ Membrane mid-surface areas, measured on the final geometry:
 
 | Membrane | Area (µm²) |
 |---|---|
-| Plasma membrane | 52.6 |
-| ER (cortical sheets and perinuclear) | 51.8 |
-| Nuclear envelope | 18.3 |
-| Mitochondrial inner membrane | 28.4 |
-| Mitochondrial outer membrane | 12.3 |
-| Vacuole | 9.9 |
-| Golgi / endosomes | 8.9 |
+| Plasma membrane | 54.3 |
+| ER (cortical sheets and perinuclear) | 54.2 |
+| Nuclear envelope | 22.5 |
+| Mitochondrial inner membrane | 28.0 |
+| Mitochondrial outer membrane | 11.7 |
+| Vacuole (all lobes) | 29.2 |
+| Golgi / endosomes | 9.5 |
 | Peroxisomes | 1.5 |
 
 ### 3.3 Organelle shapes
 
-All membranes are analytic signed-distance fields (spheres, capsules, pills and cortical-ER patches), so containment and membrane distance are exact everywhere. Shapes and fixed dimensions:
+**A composite of real cells.** The cell outline, the nucleus and the vacuoles are real shapes from a cryo-plasma FIB/SEM volume of plunge-frozen log-phase yeast (EMPIAR-11416; Dumoux *et al.* 2023), segmented into meshes by a separate pipeline (Cellpose plus manual curation):
+- **Outline, vacuoles and lipid droplets:** cell 08, the only segmented cell not cut by the edge of the imaged volume (44.2 µm³, scaled by 0.983 to 42 µm³).
+- **Nucleus:** cell 05's. Cell 08's nucleus was not segmented; cell 05's is one of two real ones, and the other (cell 04's) has its short axis along the milling direction of a cut cell. It is scaled to 8% of the cell volume and placed where the segmentation pipeline put cell 08's stand-in nucleus (the cell's most open region, where its unsegmented nucleus probably is), oriented along that stand-in's principal axes, and moved 155 nm inward to stay 260 nm below the outer surface.
+- **Not used:** the bundle's procedural mitochondria, cortical ER and peroxisomes.
+
+**Cleaning the meshes** (`pipeline/cellshape.py`; the meshes are in `pipeline/cell_meshes.npz`, extracted by `scripts/cell_meshes.py`):
+- **Smoothing:** each part is voxelised on a 20 nm grid, closed morphologically (radius 100 nm for the outline, 60 nm for the rest), which fills grooves a curtaining stripe of the FIB data cut into the outline and some vacuoles. It is then Gaussian-smoothed (σ 50 nm outline, 40 nm nucleus, 30 nm vacuoles), which removes the mesh facets and the 50 nm slice steps.
+- **Vacuole z-correction:** the segmentation loses the tops and bottoms of vacuoles. Across the 107 segmented vacuoles, z extent divided by in-plane extent is 0.55–0.61, against 1.02 for the cells, and cell 08's are mostly 0.2–0.4. The in-plane outlines are kept, and each lobe is corrected in four steps:
+  - it is stretched along z about its centroid until its z extent matches its smaller in-plane extent (stretch 1.0–3.0, median 2.0);
+  - it is smoothed more along z (σ 90 nm);
+  - its distance field is blended 1:1 with that of its moment-matched ellipsoid, which rounds the missing caps;
+  - one thin streak along the curtaining stripe (in-plane aspect 4.9) is dropped as an artefact.
+- **Vacuole volume and spacing:** the remaining 15 lobes are scaled together to 9% of the cell volume. They are carved apart where they come within 30 nm of each other or of the nucleus, or closer than 220 nm to the outer surface, and smoothed again (σ 20 nm). Several lobes press against each other and against the nucleus, as in the segmented cells; the result is 13 separate vacuole compartments with a surface-to-volume ratio of 7.8 µm⁻¹ (segmented cells: 6.8–9.9 µm⁻¹).
+- **Lipid droplets:** the 14 segmented droplets are kept as volume-equivalent spheres at their positions (radii 64–171 nm); 5 that now overlap a vacuole or the nucleus are moved to the nearest free space. Spheres also remove the droplets' z-blur (z extent / in-plane extent 1.25).
+
+**Distance fields.** Each cleaned surface is re-meshed (marching cubes) and the exact distance to it is computed at the grid nodes near the surface (closest triangle). Between nodes the distance is interpolated linearly, accurate to about 0.2 nm, so membranes, offsets (the 35 nm mannan layer, the 110 nm wall, the cortical-ER sheets) and protein orientations are as precise as with the analytic shapes. The fields are stored in sparse 8³-voxel bricks within a band around each surface, and the viewer uses the same fields (re-bricked, 7.5 MB compressed). `scripts/s2_geometry.py --sphere` builds the previous analytic cell instead.
+
+Remaining shapes and fixed dimensions:
 
 | Element | Shape and dimensions |
 |---|---|
-| Nucleus | A sphere, with the nucleolus as a crescent on the side away from the vacuole. Nuclear envelope: perinuclear space 34 nm between the membrane mid-surfaces; 117 pores of 45 nm radius at the mid-plane. |
-| Cortical ER | Sheets 27 nm beneath the plasma membrane, with a 20 nm lumen. |
-| Mitochondria | One reticulum of tubules with 150 nm radius. Intermembrane space 8 nm. Lamellar cristae with an 18 nm lumen (rim-tube radius 9 nm, chosen to fit ATP synthase dimers; section 5.6). |
-| Other organelles | Vacuole, lipid droplets, Golgi/endosome cisternae and peroxisomes are simple primitives. |
+| Nuclear envelope | Perinuclear space 34 nm between the membrane mid-surfaces, following the real nucleus. 117 pores of 45 nm radius at the mid-plane, spread uniformly over the envelope area and set along the local normal. The nucleolus is a crescent on the side away from the vacuoles (20% of the nucleus). |
+| Cortical ER | Sheets 27 nm beneath the plasma membrane, following its real shape, with a 20 nm lumen. |
+| Mitochondria | One reticulum of tubules with 150 nm radius, 440–640 nm below the outer surface. Intermembrane space 8 nm. Lamellar cristae with an 18 nm lumen (rim-tube radius 9 nm, chosen to fit ATP synthase dimers; section 5.6). |
+| Other organelles | Golgi/endosome cisternae and peroxisomes are simple primitives. |
 
-**Arrangement.** Organelle positions follow a plausible layout:
-- The nucleus is off-centre.
-- The spindle pole body faces away from the nucleolus.
-- The mitochondria form branched tubules along the cortex.
+**Arrangement.** The outline, vacuoles and lipid droplets keep their arrangement in cell 08. The nucleus sits in that cell's open region. The spindle pole body faces away from the nucleolus, and the mitochondria form branched tubules along the cortex; both are procedural.
 
-This layout is illustrative; it is not a reconstruction of a particular cell.
+**Shape statistics** of all five segmented cells (`scripts/organelle_stats.py` → `pipeline/organelle_stats.json`) were used to choose the composite's parts and to check it. The cell 08 outline is mildly non-spherical: its volume-moment semi-axes are 2.41, 2.22 and 2.00 µm.
 
-**Known geometric deviations from EM.** Serial-section EM (Yamaguchi *et al.* 2011) gives a nucleus of 10.5% of cell volume; this model has about 7%. Mitochondria are 1.7% there and about 2% here.
+**Known geometric deviations from EM.** Serial-section EM (Yamaguchi *et al.* 2011) gives a nucleus of 10.5% of cell volume; this model has 8%. Mitochondria are 1.7% there and about 2% here.
 
 ## 4. Localization
 
@@ -229,9 +246,9 @@ These structures are built before random packing. They then act as fixed obstacl
 
 ### 6.2 Microtubules and the spindle pole body
 
-- **Number:** 21 microtubules, made of 11,505 αβ-tubulin dimers:
+- **Number:** 21 microtubules, made of 11,661 αβ-tubulin dimers:
   - 16 kinetochore microtubules, 229 nm mean length;
-  - 2 other nuclear microtubules, 311 nm;
+  - 2 other nuclear microtubules, 361 nm;
   - 3 cytoplasmic microtubules, 1.0 µm.
 - **Lattice:** an ideal 13-protofilament, 3-start lattice with a seam. The lateral geometry comes from 8QV3 (native yeast γ-TuRC-capped microtubule, cryo-ET). The dimer is 5W3F, with an 8.3 nm axial repeat.
 - **Caps:** each minus end has a γ-tubulin ring of 7 γ-TuSCs from 8QV3.
@@ -272,7 +289,7 @@ Not built: fimbrin cross-links, septins, formins.
 - **Polysomes:** 70% of cytosolic ribosomes are in polysomes (assumption), with sizes 1 + Poisson(4).
   - **Chain geometry:** each ribosome's mRNA entry lies 3–12 nm beyond the previous one's exit, within a 40° cone. Neighbouring ribosomes end up 25–31 nm apart, as in cryo-ET polysomes.
   - **mRNA channel:** the path through each ribosome comes from 7ZW0, superposed on 4V88.
-  - **Result:** 93,000 ribosomes on 23,000 mRNAs.
+  - **Result:** 91,000 ribosomes on 23,000 mRNAs.
 - **Full-length mRNA:** all 30,000 mRNAs are threaded at full length through the cytosol before protein packing.
   - **Lengths:** lognormal, mean 1,500 nt, σ = 0.5 in log space, minimum 300 nt.
   - **Representation:** one bead per nucleotide, 0.6 nm apart.
@@ -321,8 +338,8 @@ These are generated deterministically from fixed seeds when you zoom in. They ar
 ### 8.1 Spatial decomposition
 
 - **Tiles:** the cell is cut into 200 nm cubic tiles; 6,416 of them intersect the cell.
-- **Copies per tile:** each species' expected copy number per compartment is split over tiles in proportion to the compartment's volume (or membrane area) in each tile. A multinomial draw with stochastic rounding conserves the cell totals.
-- **Concentrations:** uniform within each compartment.
+- **Copies per tile:** each species' expected copy number per compartment is split over tiles in proportion to the compartment's volume (or membrane area) in each tile, modulated by the large-scale organisation of section 8.4. A multinomial draw with stochastic rounding conserves the cell totals.
+- **Concentrations:** total macromolecular crowding is uniform within each compartment; the composition varies (section 8.4).
 
 ### 8.2 Algorithm
 
@@ -330,7 +347,7 @@ Random sequential addition, run independently in each tile.
 
 **Placement:**
 - **Order:** membrane proteins first, then the rest by decreasing size.
-- **Soluble molecules:** a uniformly random position in the target compartment and a uniformly random orientation.
+- **Soluble molecules:** a uniformly random position in the target compartment and a uniformly random orientation, or, for a share of copies, a position next to an interaction partner (section 8.4).
 - **Membrane proteins:** projected onto the exact membrane surface, with their membrane normal along the local surface normal and a random spin about it.
 - **Retries:** a bounded number of trials per copy. Copies that don't fit after that are left out.
 
@@ -346,20 +363,50 @@ Random sequential addition, run independently in each tile.
 ### 8.3 Consequences
 
 - **The density is not an equilibrium value.** Random sequential addition jams at lower density than real cytoplasm, and the outcome depends on insertion order. Where the requested copies exceed what random sequential addition can fit, the shortfall is reported, not hidden.
-- **The shortfall is concentrated in mitochondria.** Placed copies are 97.9% of requested overall and 99.8% outside mitochondria. In the mitochondrial matrix only 65% fit, so matrix protein density is under-represented.
-- **No interaction-driven organisation.** There are no metabolons and no condensates; enzymes are not co-localised beyond what the explicit structures in section 6 provide.
+- **The shortfall is concentrated in mitochondria.** Placed copies are 97.8% of requested overall and 99.9% outside mitochondria. In the mitochondrial matrix only 62% fit, so matrix protein density is under-represented.
+- **Interaction-driven organisation is a hypothesis layer.** Section 8.4 places partners near each other and co-enriches network modules, but with assumed strengths. There are no explicit condensates, and the layer is not fitted to any measured protein positions.
+
+### 8.4 Organisation from association data
+
+Uniform random placement is itself an assumption: that proteins have no spatial organisation beyond their compartment. The model replaces it with a weak, data-driven organisation at two scales. Neither scale is calibrated against measured protein positions, which hardly exist at this resolution. The strengths are tuned so that the packing stays random-looking but is measurably organised, and total crowding stays uniform. Code: `pipeline/organisation.py`; `scripts/s3_pack.py --random` builds the same cell without this layer.
+
+**Data:**
+- **STRING v12** (Szklarczyk *et al.* 2023, Nucleic Acids Res. 51:D638): 102,672 links with combined score ≥ 700 between yeast proteins. STRING includes indirect associations (shared pathways, co-expression, text mining) that a structure prediction cannot see.
+- **AlphaFold 3 pool predictions** (in-house, unpublished): every protein was predicted in many random multi-protein pools, giving a chain-pair score for about 10.3 million protein pairs. The best (lowest) chain-pair PAE min-min per pair is used.
+  - **Calibration against known interactions:** pairs at ≤ 2 Å are 73% Complex Portal pairs and 72% have IntAct evidence; pairs at 2–4 Å, 43% and 48%; pairs at 6–8 Å are still 50 and 10 times above the background of 0.06% and 0.6%.
+  - **Shared localization:** confident pairs also share compartments much more often than random pairs (overlap of their localization weights 0.56–0.62 vs 0.22).
+  - **Used:** 15,262 pairs at ≤ 8 Å after filtering. A pair is dropped when a paralog of one partner scores better with the other, which removes homologous-interface artefacts such as Pol II subunits scored against their Pol III paralogs.
+
+**Large scale (hundreds of nm): network-informed sampling of where each species goes.**
+- **Modules:** STRING (≥ 700) is split by Louvain clustering (resolution 2) into 31 modules of ≥ 10 proteins, covering 5,459 proteins. Examples: glycolysis and translation factors; actin and cortical proteins; trafficking GTPases and coat proteins; ubiquitin–proteasome; mRNA-binding proteins; ergosterol synthesis.
+- **Membership:** a protein's membership in each module is the share of its STRING weight that links into that module. A complex takes the mean over its subunits. 4,607 of the 5,638 species are modulated.
+- **Fields:** each module has a smooth Gaussian random field over the cell (correlation length 500 nm, unit variance). A species' copies are distributed over tiles in proportion to region volume × exp(0.8 × Σ membership × field).
+- **Crowding:** an iterative correction keeps each tile's total macromolecular volume proportional to its compartment volume, so composition varies between regions but crowding does not.
+- **Effect:** in fully cytosolic tiles, module densities vary across tiles with a coefficient of variation of 0.44, against 0.10 for random placement, and form domains a few hundred nm across with roughly 0.3–3 times the mean density. Total crowding varies as little as with random placement (CV 0.042 vs 0.041).
+
+**Meso and small scale (nm to tens of nm): partners placed next to each other.**
+- **Partners:** each species gets up to 16 partners. Pool pairs are "contact" partners; STRING links that are not pool pairs are "loose" partners. Strength is scaled from the PAE (1 at ≤ 2 Å, falling to 0 at 8 Å) or the STRING score (0.2 at 700 to 1 at 1000), and divided by √(degree/20) for proteins with more than 20 links, so hubs do not dominate.
+- **Attraction:** when a copy is placed, each partner p contributes a_p = strength × A × n_p / (8 + n_p). Here n_p is the number of copies of p already placed in the tile and its halo, and A is 0.6 for contact and 0.25 for loose partners. The pull saturates with the partner's local copy number, like mass action.
+  - With probability min(0.6, Σ a_p), the copy is proposed next to a randomly chosen placed copy of a partner (chosen in proportion to a_p): in contact for contact partners, with a 2–15 nm gap for loose partners.
+  - The copy gets up to 40 such proposals; if none passes the collision and compartment checks, it is placed at random as before.
+- **Effect:** 5.8 M copies drew a partner and 4.2 M of them (about 20% of all placed molecules) were placed next to one. A molecule's contact partner lies within contact distance 6.4% of the time (random placement: 0.8%), and a loose partner within 15 nm 19.6% of the time (random: 14.6%). Placement completeness is unchanged (97.9%).
+
+**What it is not:** strengths and bound fractions are assumptions, as no affinities are used; the partners are not bound in a specific orientation (pre-docked pairs are a separate future step); and smaller species are pulled towards larger ones that are already placed, since species are placed in order of decreasing size.
+
+**In the viewer:** Display → colour "Interaction module (STRING)" colours each species by its dominant module. Clicking a module in the legend highlights it.
 
 ## 9. Validation
 
 | Check | Result |
 |---|---|
-| Residue-bead clashes (beads of different molecules closer than 0.3 nm) | 1.4 × 10⁻⁶ of 2.9 M sampled beads in 64 test cubes; 0 between tiles |
-| Containment (beads outside their compartment) | 4.3 × 10⁻⁵ of 17 M beads |
+| Residue-bead clashes (beads of different molecules closer than 0.3 nm) | 1.9 × 10⁻⁶ of 3.1 M sampled beads in 64 test cubes; 4 between tiles |
+| Containment (beads outside their compartment) | 5.6 × 10⁻⁵ of 17 M beads |
 | Membrane-protein orientation vs local surface normal | median 0.0°, 100% within 1° |
-| TM residues within 2 nm of the membrane mid-surface | 97.2% (median 0.73 nm) |
+| TM residues within 2 nm of the membrane mid-surface | 97.3% (median 0.73 nm) |
 | ATP synthase dimer TM residues within 2 nm of the mid-surface | 98.8% |
-| Placed / requested copies | 97.9% overall; 99.8% outside mitochondria; matrix 65%; nucleolus 95% |
+| Placed / requested copies | 97.8% overall; 99.9% outside mitochondria; matrix 62%; nucleolus 99% |
 | Inventory protein mass vs proteome | within 0.4% before packing |
+| Organisation layer (section 8.4), against a random repack | contact partners in contact 6.4% vs 0.8%; loose partners within 15 nm 19.6% vs 14.6%; module density CV 0.44 vs 0.10; total crowding CV 0.042 vs 0.041 |
 
 ## 10. Densities, mass and volume fractions
 
@@ -369,18 +416,18 @@ Densities are the mass of placed macromolecules per compartment volume. They cou
 
 | Compartment | Protein (mg/mL) | RNA/DNA (mg/mL) | Total (mg/mL) | Dry volume fraction |
 |---|---|---|---|---|
-| Cytosol | 67 | 22 | 89 | 6.1% |
-| Nucleoplasm | 56 | 6 | 62 | 4.4% |
-| Nucleolus | 87 | 6 | 94 | 6.7% |
-| Mitochondrial matrix | 108 | 4 | 113 | 8.1% |
-| Mitochondrial intermembrane space | 27 | 0 | 27 | 1.9% |
-| ER lumen | 32 | 0 | 32 | 2.3% |
+| Cytosol | 70 | 23 | 93 | 6.4% |
+| Nucleoplasm | 50 | 5 | 56 | 4.0% |
+| Nucleolus | 79 | 6 | 85 | 6.1% |
+| Mitochondrial matrix | 107 | 4 | 111 | 8.0% |
+| Mitochondrial intermembrane space | 27 | 0 | 27 | 2.0% |
+| ER lumen | 28 | 0 | 28 | 2.1% |
 | Golgi / endosomes | 64 | 0 | 64 | 4.7% |
 | Peroxisomes | 83 | 0 | 83 | 6.1% |
-| Vacuole | 5 | 0 | 5 | 0.4% |
+| Vacuole | 4 | 0 | 4 | 0.3% |
 
 - **Dry volume fraction:** computed with partial specific volumes of 0.73 mL/g for protein and 0.55 mL/g for nucleic acid.
-- **Hydrated volume fraction:** with a hydration shell of about 0.3–0.4 g water per g, the hydrated volume fraction is roughly 1.5× the dry one: about 9–10% in the cytosol.
+- **Hydrated volume fraction:** with a hydration shell of about 0.3–0.4 g water per g, the hydrated volume fraction is roughly 1.5× the dry one: about 10% in the cytosol.
 - **Excluded volume:** the volume excluded to a diffusing particle is larger still, and grows with the particle's size. It can be computed from the coordinates as accessible volume versus probe radius; this has not been done yet.
 
 ### 10.2 Whole-cell totals
@@ -389,7 +436,7 @@ Densities are the mass of placed macromolecules per compartment volume. They cou
 |---|---|
 | Protein in the inventory | 2.7 pg |
 | Protein placed | 2.2 pg |
-| RNA and DNA placed | 0.64 pg |
+| RNA and DNA placed | 0.62 pg |
 | mRNA | 0.02 pg |
 
 Placed protein is lower than the inventory for four reasons:
@@ -398,7 +445,7 @@ Placed protein is lower than the inventory for four reasons:
 - mitochondrial copies that did not fit;
 - dropped and structure-less copies.
 
-With full-length sequences, cytosolic protein would be about 80–85 mg/mL.
+With full-length sequences, cytosolic protein would be about 85–90 mg/mL.
 
 ### 10.3 Comparison with dry-mass measurements
 
@@ -406,9 +453,9 @@ Measured cytoplasmic dry-mass densities are around 200 mg/mL, more than twice th
 
 | Component | Estimate (mg/mL) | Basis |
 |---|---|---|
-| Macromolecules as placed | about 90 | This model |
+| Macromolecules as placed | about 90 | This model (cytosol 93, nucleus about 60) |
 | Full-length protein correction | about +15 | Section 10.2 |
-| Lipids of internal membranes and lipid droplets | about 20–25 | About 130 µm² of internal membrane plus 0.4 µm³ of lipid droplets in this model, about 0.8 pg of lipid |
+| Lipids of internal membranes and lipid droplets | about 20–25 | About 155 µm² of internal membrane plus 0.14 µm³ of lipid droplets in this model, about 0.8 pg of lipid |
 | Small molecules and ions | probably 30–40 | Free amino acids, nucleotides, glutathione, sugar phosphates, phosphate and K⁺, a few hundred mM in total |
 | Glycogen and trehalose | low in log phase on glucose | Can exceed 10% of dry weight after the diauxic shift |
 
@@ -418,9 +465,10 @@ Together these give about 150–160 mg/mL. The remainder is within the uncertain
 
 | Area | Limitation |
 |---|---|
-| Physics | Static random sequential addition: no interactions, no dynamics, random orientations, and densities below the jamming limit of real cytoplasm. The optional motion is illustrative (section 7). |
+| Physics | Static random sequential addition: no physical interactions or dynamics, random orientations, and densities below the jamming limit of real cytoplasm. The optional motion is illustrative (section 7). |
+| Organisation | Partner proximity and module domains (section 8.4) follow assumed strengths, not measurements. Partners are near each other, not bound in specific orientations. |
 | Abundances | About 2-fold per-protein uncertainty. The proteome total is probably low. Ribosomes are probably low (169,000 vs about 3 × 10⁵ estimated). Fixed counts for tRNA and mRNA are assumptions. |
-| Geometry | Illustrative layout. Nucleus smaller than in EM. A single mitochondrial reticulum. No bud, so no cell-cycle-dependent structures. |
+| Geometry | A composite of two segmented cells; vacuole thickness along z is reconstructed (the segmentation flattens vacuoles). Nucleus smaller than in EM. A single procedural mitochondrial reticulum. No bud, so no cell-cycle-dependent structures. |
 | Mitochondria | Matrix only 65% filled; mitochondrially encoded subunits are inferred from their complexes. |
 | Disorder | AlphaFold residues with pLDDT < 50 are deleted rather than represented, except the FG domains of 4 Nups. |
 | Localization | Bulk steady state from annotations. 625 proteins default to the cytosol. Dual localizations are weighted by rank, not measured. |
@@ -443,7 +491,9 @@ Together these give about 150–160 mg/mL. The remainder is within the uncertain
 | Complex Portal (EMBL-EBI) | Curated complexes for taxon 559292 | |
 | IntAct | Physical interactions, to decide heterodimer binding | |
 | Alliance of Genome Resources | Paralog pairs | |
-| AlphaFold 3 pool predictions (in-house, unpublished) | Conformational ensembles behind the optional motion | not public |
+| AlphaFold 3 pool predictions (in-house, unpublished) | Conformational ensembles behind the optional motion; pair scores for partner placement | not public |
+| STRING v12 | Functional and physical associations, for interaction modules and loose partners | CC-BY 4.0 |
+| EMPIAR-11416 (cryo-plasma FIB/SEM of yeast), segmented into cell, vacuole, lipid-droplet and nucleus meshes | The cell outline, vacuoles and lipid droplets (cell 08) and the nucleus (cell 05) of the model cell (section 3.3) | CC0 |
 
 ### 12.2 Literature behind the parameters
 
@@ -452,6 +502,8 @@ Together these give about 150–160 mg/mL. The remainder is within the uncertain
 | Ho B, Baryshnikova A, Brown GW (2018). *Cell Systems* 6:192–205 | Total protein molecules per cell |
 | Jorgensen P *et al.* (2002). *Science* 297:395–400 | Cell volume |
 | Uchida M *et al.* (2011). *Yeast* 28:227–236 | Organelle volume fractions (soft X-ray tomography) |
+| Dumoux M *et al.* (2023). *eLife* 12:e83623; EMPIAR-11416 | Cryo-plasma FIB/SEM volume of yeast; segmented cells used for nucleus, vacuole and lipid-droplet characteristics |
+| Jorgensen P *et al.* (2007). *Mol. Biol. Cell* 18:3523–3532 | Nuclear-to-cell volume ratio |
 | Yamaguchi M *et al.* (2011). *Microscopy* 60:321–335, doi:10.1093/jmicro/dfr052 | Serial-section EM comparison |
 | Orlean P (2012). *Genetics* 192:775–818 | Cell-wall thickness and composition |
 | Wolf W *et al.* (2012). *PLoS ONE* 7:e39703 | Cortical ER coverage |
@@ -479,7 +531,7 @@ The other complexes and homo-oligomers are listed per species in the viewer's in
 
 ## 13. Reproducibility and data access
 
-- **Pipeline.** The model is built by a Python pipeline (numba-accelerated) in five stages: inventory, geometry, packing, validation and encoding. A full rebuild takes roughly 10–15 minutes on a recent multi-core desktop or laptop, with fixed seeds throughout. An optional sixth stage fits the motion modes (section 7); it needs the pool predictions, which are not public. The shipped modes are in `data/library/modes.bin`.
+- **Pipeline.** The model is built by a Python pipeline (numba-accelerated) in five stages: inventory, geometry, packing, validation and encoding. A full rebuild takes roughly 10–15 minutes on a recent multi-core desktop or laptop, with fixed seeds throughout. The real shapes come from `pipeline/cell_meshes.npz` (in the repository). The organisation layer of the packing (section 8.4) needs STRING (public) and the pool pair scores (not public; the derived partner lists are reproducible only with them). An optional sixth stage fits the motion modes (section 7); it also needs the pool predictions. The shipped modes are in `data/library/modes.bin`.
 - **Source code.** The pipeline and the viewer source are in `source/`; `source/README.md` explains how to rebuild.
 - **This repository** holds the built viewer and the encoded data.
   - The tiles under `data/tiles/` store every instance as a species index, a position quantised to about 0.0055 nm and an orientation quantised to about 0.004°.

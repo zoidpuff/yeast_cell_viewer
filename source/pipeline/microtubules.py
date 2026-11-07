@@ -146,11 +146,12 @@ def place(cell, lp, n_dimers, obstacles=None, seed=31, log=print):
     phi, dz, D, r0 = np.radians(prm["phi_deg"]), prm["dz"], prm["dimer"], prm["r0"]
     ring_c = np.array(prm["ring_c"])
     rng = np.random.default_rng(seed)
-    G = cell.G; cn = G[3:6]; rn = G[6]
+    G = cell.G; cn = G[3:6]
     nrm = G[7:10] - cn; nrm /= np.linalg.norm(nrm)
     spb_dir = -nrm                                   # SPB opposite the nucleolus (as in the chromatin pre-pass)
-    plaques = {"nuc": (cn + spb_dir * (rn - c3.PERI_W - PLAQUE_GAP), nrm, 1 << c3.NUCP, t3.R_NUCP, LIB_RING_NUC),
-               "cyto": (cn + spb_dir * (rn + PLAQUE_GAP), spb_dir, 1 << c3.CYTO, t3.R_CYTO, LIB_RING_CYTO)}
+    _, n_out = c3.nuc_surface(G, spb_dir)            # NE normal at the SPB
+    plaques = {"nuc": (c3.nuc_surface(G, spb_dir, -(c3.PERI_W + PLAQUE_GAP))[0], -n_out, 1 << c3.NUCP, t3.R_NUCP, LIB_RING_NUC),
+               "cyto": (c3.nuc_surface(G, spb_dir, PLAQUE_GAP)[0], n_out, 1 << c3.CYTO, t3.R_CYTO, LIB_RING_CYTO)}
     # target lengths, scaled down if the pool is short
     plan = [("nuc", "kMT", rng.normal(*KMT_LEN)) for _ in range(N_KMT)] + \
            [("nuc", "nMT", rng.normal(*NUC_LEN)) for _ in range(N_NUC)] + [("cyto", "cMT", rng.normal(*CYTO_LEN)) for _ in range(N_CYTO)]

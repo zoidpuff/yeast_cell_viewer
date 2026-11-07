@@ -5,7 +5,7 @@
 """
 import argparse, gzip, shutil, multiprocessing as mp
 from _common import *
-import cell3d as c3, tiles3d as t3, webenc as we, wc3d
+import cell3d as c3, tiles3d as t3, webenc as we, wc3d, organisation as og
 
 MRNA_PIECE = 64          # nt per encoded mRNA piece (pieces are assigned to tiles by their midpoint)
 IDX_COLS = ["ti", "n_inst", "n_ghost", "n_mrna", "n_mrna_beads", "n_link", "n_link_beads", "n_vert", "n_tri", "raw_bytes", "gz_bytes"]
@@ -94,6 +94,8 @@ def main():
 
     ing, _ = load_inventory()
     log("library", we.encode_library(meta, ing, counts_by_type, region_counts))
+    if os.path.exists(f"{og.ODIR}/modules.json"):          # organisation layer of s3 (module colouring in the viewer)
+        og.encode_viewer(we.OUT, log=log)
     labvol = pd.read_parquet(f"{C.W3D}/tile_labvol.parquet")
     index = tile_index(tiles, st2, labvol)
     types_tiles(tiles, NT)
@@ -144,12 +146,57 @@ def types_tiles(tiles, NT):
         f.write(offs.astype("<u4").tobytes()); f.write(np.concatenate([np.array(x, "<u2") for x in tt]).tobytes())
 
 
+WEB_BANDS = [(180.0, 40.0), (40.0, 40.0), (100.0, 100.0)]   # viewer bands (in, out) of the cell, vacuole, nucleus fields
+FIELD_Q = 0.01                                               # nm per int16 step
+
+
+def web_fields(cell):
+    """the real-shape distance fields for the viewer (geometry_fields.bin; layout in web/app/src/fields.ts):
+    split into bricks of half the edge (less padding around the thin bands), re-classified for narrower bands, node
+    values as int16 in FIELD_Q steps. None for an analytic cell."""
+    if not cell.fields:
+        return None
+    heads, n_index, n_data, parts = [], [], [], []
+    off = 1 + 12 * len(cell.fields)
+    for (h, idx, data), (bin_, bout) in zip(cell.fields, WEB_BANDS):
+        B = int(h[7]); n1 = B + 1; nbx, nby, nbz = int(h[4]), int(h[5]), int(h[6]); b2 = B // 2
+        blocks = data.reshape(-1, n1, n1, n1)
+        old = idx.astype(np.int64).reshape(nbx, nby, nbz)
+        new = np.empty((2 * nbx, 2 * nby, 2 * nbz), np.int64); keep = []
+        for bx in range(2 * nbx):
+            for by in range(2 * nby):
+                for bz in range(2 * nbz):
+                    o = old[bx // 2, by // 2, bz // 2]
+                    if o < 0:
+                        new[bx, by, bz] = o; continue
+                    i0, j0, k0 = (bx % 2) * b2, (by % 2) * b2, (bz % 2) * b2
+                    blk = blocks[o, i0:i0 + b2 + 1, j0:j0 + b2 + 1, k0:k0 + b2 + 1]
+                    if blk.max() <= -bin_:
+                        new[bx, by, bz] = -1
+                    elif blk.min() >= bout:
+                        new[bx, by, bz] = -2
+                    else:
+                        new[bx, by, bz] = len(keep); keep.append(np.clip(blk, -bin_, bout).ravel())
+        idx = new.ravel()
+        dat = np.round(np.concatenate(keep) / FIELD_Q).astype(np.int16) if keep else np.zeros(0, np.int16)
+        hd = [float(h[0]), float(h[1]), float(h[2]), float(h[3]), 2.0 * nbx, 2.0 * nby, 2.0 * nbz, float(b2),
+              bin_, bout, float(off), float(off + len(idx))]
+        off += len(idx) + len(dat)
+        heads.append(hd); n_index.append(int(len(idx))); n_data.append(int(len(dat)))
+        pad = (-2 * len(dat)) % 4
+        parts += [idx.astype(np.int32).tobytes(), dat.tobytes() + b"\0" * pad]
+    open(f"{we.OUT}/geometry_fields.bin", "wb").write(b"".join(parts))
+    log(f"geometry fields for the viewer: {sum(n_data) / 1e6:.1f} M nodes, "
+        f"{os.path.getsize(f'{we.OUT}/geometry_fields.bin') / 1e6:.1f} MB")
+    return dict(file="geometry_fields.bin", head=heads, n_index=n_index, n_data=n_data, q=FIELD_Q)
+
+
 def web_geometry(cell):
     """primitives + uniform acceleration grid for the WGSL SDF"""
     geo = json.load(open(f"{C.W3D}/geometry.json"))
-    GN, EXT = 32, 2200.0; h = 2 * EXT / GN
+    GN, EXT = 36, 2600.0; h = 2 * EXT / GN       # encloses the real cell outline (viewer tile grid: +-2.6 um)
     bc, br = cell.bc, cell.br
-    pc = cell.G[3:6] + cell.pores * (cell.G[6] - 0.5 * c3.PERI_W); pr = c3.PORE_R + c3.PERI_W + 12
+    pc = cell.pores[:, :3]; pr = c3.PORE_R + c3.PERI_W + 12
     cells_p, cells_q = [], []
     for ix in range(GN):
         for iy in range(GN):
@@ -159,7 +206,8 @@ def web_geometry(cell):
                 q = np.clip(pc, lo, hi); cells_q.append(np.where(((q - pc) ** 2).sum(1) <= pr ** 2)[0])
     goff = np.zeros(GN ** 3 + 1, np.int64); goff[1:] = np.cumsum([len(a) for a in cells_p])
     qoff = np.zeros(GN ** 3 + 1, np.int64); qoff[1:] = np.cumsum([len(a) for a in cells_q])
-    gweb = dict(G=geo["G"], pores=cell.pores.round(6).ravel().tolist(), PT=geo["PT"], PQ=np.round(cell.PQ, 4).ravel().tolist(), PC=geo["PC"],
+    fields = web_fields(cell)
+    gweb = dict(G=geo["G"], fields=fields, pores=cell.pores.round(6).ravel().tolist(), PT=geo["PT"], PQ=np.round(cell.PQ, 4).ravel().tolist(), PC=geo["PC"],
                 consts=geo["consts"], label_names=c3.LABEL_NAMES, mem_names=c3.MEM_NAMES, npc_pos=geo["npc_pos"], mito_segments=geo["mito_segments"],
                 grid=dict(n=GN, ext=EXT, prim_off=goff.tolist(), prim_idx=np.concatenate(cells_p).tolist(),
                           pore_off=qoff.tolist(), pore_idx=np.concatenate(cells_q).tolist()))
@@ -203,23 +251,35 @@ def bookmarks(tiles, ids, cell, labvol):
         for k, v in li.items(): tcount[k][i] = (ty == v).sum()
     lv = labvol.values; lcol = list(labvol.columns)
     tc = lambda i: np.array(tiles[i], float) * 200 + 100
-    G = cell.G; cn = G[3:6]; vc = np.array([985., -170., -110.])
+    G = cell.G; cn = G[3:6]
+    vac = [i for i, c in enumerate(cell.PC) if c == c3.C_VAC]
+    if vac:                                                   # analytic cell: the largest vacuole lobe
+        big = max(vac, key=lambda i: cell.PQ[i, 3]); vc = cell.PQ[big, :3]; rv = cell.PQ[big, 3]
+        vac_target, vac_u = vc + unit(-vc) * rv, unit(-vc)
+    else:                                                     # real shapes: vacuole membrane point nearest the centre
+        Pr = np.random.default_rng(3).uniform(-G[0], G[0], (400000, 3))
+        dv = np.array([c3.field_sdf(p[0], p[1], p[2], G, c3.F_VAC) for p in Pr])
+        vc = Pr[dv < 0].mean(0)
+        near = Pr[(np.abs(dv) < 4) & (np.array([c3.outer_depth(*p, G) for p in Pr]) > 250)]     # (cell field clamped at 260)
+        vac_target = near[np.argmin(np.linalg.norm(near, axis=1))]
+        vac_u = -c3._grad(lambda x, y, z: c3.field_sdf(x, y, z, G, c3.F_VAC), vac_target)
     n_inst = sum(t["copies"] for t in json.load(open(f"{we.OUT}/library/types.json"))["types"])
     bm = [dict(name="Whole cell", caption=f"Equatorial section through nucleus and vacuole. {n_inst / 1e6:.1f} million macromolecules, every one a real PDB or AlphaFold structure.",
                target=[0, 0, 0], normal=unit(np.cross(cn, vc)), up=unit(cn), width=5200, slab=60)]
-    u = unit(-cn - vc)
-    bm.append(dict(name="Cell wall", caption="Mannoprotein brush (outer 35 nm) over the beta-glucan layer, plasma membrane below.", target=u * (G[0] - 55), normal=perp(u), up=u, width=260, slab=40))
+    u = unit(np.cross(cn, vc))
+    bm.append(dict(name="Cell wall", caption="Mannoprotein brush (outer 35 nm) over the beta-glucan layer, plasma membrane below.", target=u * c3.ray_depth(G, u, 55.0), normal=perp(u), up=u, width=260, slab=40))
     cer_col = lcol.index("cER_lumen")
     cand = [i for i in np.argsort(-tcount["Pma1_hexamer"]) if lv[i, cer_col] == 0][:1]
     u = unit(tc(cand[0]))
     bm.append(dict(name="Plasma membrane (face-on)", caption="Cytoplasmic face of the plasma membrane: Pma1 H+-ATPase hexamers among ~1,000 other membrane proteins; lipids generated around them.",
-                   target=u * (G[2] - 18), normal=u, up=perp(u), width=220, slab=30))
+                   target=u * c3.ray_depth(G, u, G[0] - G[2] + 18.0), normal=u, up=perp(u), width=220, slab=30))
     cer = [i for i, c in enumerate(cell.PC) if c == c3.C_CER]
     q = cell.PQ[cer[0]]; u = unit(q[:3])
-    bm.append(dict(name="Cortical ER", caption="Cortical ER sheet 27 nm beneath the plasma membrane, with Sec61 translocons and ER-bound ribosomes.", target=u * q[5], normal=perp(u), up=u, width=320, slab=40))
+    tgt = u * c3.ray_depth(G, u, G[0] - G[2] + c3.CER_GAP + 0.5 * c3.CER_LUMEN)    # on the sheet, under the real outline
+    bm.append(dict(name="Cortical ER", caption="Cortical ER sheet 27 nm beneath the plasma membrane, with Sec61 translocons and ER-bound ribosomes.", target=tgt, normal=perp(u), up=u, width=320, slab=40))
     cyto = lcol.index("cytosol")
     i = [i for i in np.argsort(-tcount["ribosome_80S"]) if lv[i, cyto] > 0.99 * lv[i].sum()][0]
-    bm.append(dict(name="Cytoplasm", caption="Crowded cytoplasm (~89 mg/mL): 80S ribosomes (pink), most of them threaded on mRNAs as polysomes, with glycolytic enzymes and tRNAs.", target=tc(i), normal=unit([0.2, -0.4, 0.89]), up=unit([0, 1, 0.45]), width=160, slab=30))
+    bm.append(dict(name="Cytoplasm", caption="Crowded cytoplasm (~93 mg/mL): 80S ribosomes (pink), most of them threaded on mRNAs as polysomes, with glycolytic enzymes and tRNAs.", target=tc(i), normal=unit([0.2, -0.4, 0.89]), up=unit([0, 1, 0.45]), width=160, slab=30))
     pre = dict(np.load(f"{C.W3D}/prepass.npz"))
     if "act_pos" in pre:   # longest actin filament: view the cortex from inside, cut plane through the cable
         f = np.bincount(pre["act_fil"]).argmax(); P = pre["act_pos"][pre["act_fil"] == f]
@@ -227,7 +287,7 @@ def bookmarks(tiles, ids, cell, labvol):
         bm.append(dict(name="Actin cable", caption="Actin cable beneath the cortex: a bundle of F-actin filaments (orange; 9GO5 subunit and helix: 167 deg, 2.76 nm per subunit) coated by tropomyosin TPM1 (teal) along both strands, running past polysomes and cytosolic proteins.",
                        target=mid, normal=u, up=tdir, width=400, slab=40))
     if "mt_pos" in pre:    # SPB: section through the plaque axis, nuclear MT bouquet below, cytoplasmic MTs above
-        sd = unit(cn - G[7:10]); spb = cn + sd * G[6]
+        spb, sd = c3.nuc_surface(G, cn - G[7:10])
         nuc_mt = pre["mt_reg"] == t3.R_NUCP
         side = unit(np.cross(sd, unit(pre["mt_pos"][nuc_mt].mean(0) - spb) + [0.1, 0.2, 0.3]))
         bm.append(dict(name="Spindle pole body", caption="Microtubules (green; 8QV3 lattice, 13 protofilaments) grow from gamma-tubulin rings on the spindle pole body: "
@@ -240,12 +300,12 @@ def bookmarks(tiles, ids, cell, labvol):
             bm.append(dict(name="Cytoplasmic microtubule", caption="A cytoplasmic microtubule, 25 nm wide and about a micrometre long, curving through the crowded cytoplasm.",
                            target=mid, normal=unit(np.cross(tdir, unit(mid))), up=tdir, width=700, slab=40))
     if "pat_pos" in pre and len(pre["pat_pos"]):   # largest actin patch, seen from the side (membrane at the top)
-        j = int(np.bincount(pre["pat_id"]).argmax()); P = pre["pat_pos"][pre["pat_id"] == j]; c = P.mean(0); u = unit(c / G[:3] ** 2)
+        j = int(np.bincount(pre["pat_id"]).argmax()); P = pre["pat_pos"][pre["pat_id"] == j]; c = P.mean(0); u = -c3._grad(lambda x, y, z: c3.outer_depth(x, y, z, G), c)
         bm.append(dict(name="Actin patch", caption="Endocytic actin patch under the plasma membrane: short actin filaments (orange) branching at 73 deg from "
                        "Arp2/3 complexes (red; 8UXW junction) and capped by capping protein (purple; 8F8Q), barbed ends toward the membrane.",
                        target=c, normal=perp(u), up=u, width=360, slab=50))
-    pcen = cn + cell.pores * (G[6] - 0.5 * c3.PERI_W)
-    k = int(np.argmax(np.linalg.norm(pcen, axis=1))); ax = unit(cell.pores[k])
+    pcen = cell.pores[:, :3]
+    k = int(np.argmax(np.linalg.norm(pcen, axis=1))); ax = unit(cell.pores[k, 3:6])
     bm.append(dict(name="Nuclear pore complex", caption="NPC (PDB 7N9F) seated in a toroidal pore membrane joining the outer and inner nuclear membranes.", target=pcen[k], normal=perp(ax), up=ax, width=260, slab=50))
     nucp = lcol.index("nucleoplasm")
     i = [i for i in np.argsort(-tcount["nucleosome"]) if lv[i, nucp] > 0.95 * lv[i].sum()][0]
@@ -255,8 +315,8 @@ def bookmarks(tiles, ids, cell, labvol):
     bm.append(dict(name="Nucleolus", caption="Nucleolar crescent (ribosome assembly factors, snoRNPs, Pol I) bordering the nucleoplasm.", target=tc(i), normal=perp(uu), up=uu, width=450, slab=40))
     seg = np.array(geo["mito_segments"][len(geo["mito_segments"]) // 2]); a = unit(seg[1] - seg[0])
     bm.append(dict(name="Mitochondrion", caption="Mitochondrial tubule: outer and inner membranes, lamellar cristae lined at their rims by rows of ATP synthase dimers (8F39 monomers in the 4B2Q dimer arrangement), and the protein-dense matrix (~110 mg/mL).", target=seg.mean(0), normal=perp(a), up=a, width=420, slab=40))
-    u = unit(-vc)
-    bm.append(dict(name="Vacuole", caption="Vacuolar membrane with V-ATPases; the vacuole lumen is dilute (~5 mg/mL).", target=vc + u * 889.0, normal=perp(u), up=u, width=300, slab=40))
+    u = vac_u
+    bm.append(dict(name="Vacuole", caption="Vacuolar membrane with V-ATPases; the vacuole lumen is dilute (~4 mg/mL). The vacuole is a cluster of lobes, as in cryo-FIB/SEM of log-phase cells.", target=vac_target, normal=perp(u), up=u, width=300, slab=40))
     q = cell.PQ[[i for i, c in enumerate(cell.PC) if c == c3.C_LD][0]]
     bm.append(dict(name="Lipid droplet", caption="Lipid droplet: neutral-lipid core with a phospholipid monolayer and peripheral proteins, touching ER.", target=q[:3], normal=unit([0, 0, 1]), up=unit([0, 1, 0]), width=560, slab=40))
     q = cell.PQ[[i for i, c in enumerate(cell.PC) if c == c3.C_GOLGI][0]]
@@ -277,7 +337,7 @@ def wall_budget(tiles, cell, ing, labvol):
         if not (lv[i, lcol.index("wall_mannan")] > 0): continue
         z = np.load(f"{C.WEB_TMP}/{t3.tile_name(t)}.npz")
         k = z["region"] == t3.REGION_NAMES.index("cell_wall")
-        n_wp += int((np.linalg.norm(z["pos"][k], axis=1) > cell.G[1] - 5).sum())
+        n_wp += int(sum(c3.outer_depth(p[0], p[1], p[2], cell.G) < cell.G[0] - cell.G[1] + 5 for p in z["pos"][k]))
     return dict(dry_mass_pg=dry * 1.66054e-12, wall_mass_pg=wall * 1.66054e-12, glucan_glucose=glc_res, mannose=man_res,
                 glucan_beads_per_nm3=glc_res / 36 / vol_glucan, glucan_layer_um3=vol_glucan / 1e9, mannan_layer_um3=vol_mannan / 1e9,
                 wall_proteins_in_mannan_layer=n_wp, mannan_beads_per_protein=man_res / 3 / max(n_wp, 1))

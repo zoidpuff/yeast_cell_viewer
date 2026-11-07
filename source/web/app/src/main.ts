@@ -2,7 +2,8 @@ import { Renderer, FrameState, ID_INST, ID_LIPID, ID_FREE } from './renderer';
 import { Camera, CamState } from './camera';
 import { TileManager, LoadedTile } from './tiles';
 import { Geometry } from './geometry';
-import { loadLibrary, loadTileIndex, fetchJson, fetchBin, Library, TileIndex, REGION_NAMES, MEM_NAMES, LABEL_NAMES, PAL, SPECIAL, b64ToBytes } from './data';
+import { loadLibrary, loadTileIndex, fetchJson, fetchBin, Library, TileIndex, REGION_NAMES, MEM_NAMES, LABEL_NAMES, PAL, SPECIAL, b64ToBytes, moduleColor } from './data';
+import { loadFields } from './fields';
 import { V3, dot, norm, cross, sub, add, scale, len } from './math';
 import { ABOUT_HTML } from './about';
 import { markdownToHtml } from './markdown';
@@ -23,7 +24,7 @@ const canvas = $<HTMLCanvasElement>('gpu');
 
 const fs: FrameState = {
   cutOn: true, plane: [0, 0, 1, 0], slab: 60, colorMode: 0, regionMask: 0xFFFFFF, freeHide: 0, highlight: false,
-  selId: 0, shaded: true, organelle: false, motion: 0, l0px: 1.6, l1px: 2.5, minpx: 0.3, outline: 1, showMeshes: true, showLipids: true, renderScale: 1,
+  selId: 0, shaded: true, organelle: false, motion: 0, l0px: 1.6, l1px: 2.5, minpx: 0.3, outline: 1, showMeshes: true, showLipids: true, renderScale: 1, memColors: false,
 };
 let planeFollow = false;
 let dirty = true, lastUpdate = 0, lastFrameT = 0, quality = 'auto';
@@ -71,6 +72,7 @@ async function boot() {
   try {
     setLoading('Loading cell geometry', 0.01);
     [geo, bookmarks] = await Promise.all([fetchJson('geometry.json'), fetchJson('bookmarks.json')]);
+    geo.F = await loadFields(geo, fetchBin);      // real cell shapes (null for the analytic cell)
     geom = new Geometry(geo);
     idx = await loadTileIndex();
     lib = await loadLibrary(setLoading);
@@ -100,7 +102,7 @@ async function boot() {
     applyBookmark(v0, false);
     $('loading').style.display = 'none';
     requestAnimationFrame(loop);
-    window.yc = { R, T, cam, fs, lib, idx, applyBookmark, setType, pickAt, bookmarks, setQuality, describe, ready: true, state: () => ({ pending: T.pendingForView(), detailPending: T.detInflight, loaded: T.loaded.size, totals: T.totals(), stats: R.stats, cam: { t: cam.target, d: cam.dist }, plane: fs.plane, gpuMs, gpuBusy, dirty }), render: () => { dirty = true; } };
+    window.yc = { R, T, cam, fs, lib, idx, applyBookmark, setType, setModule, pickAt, bookmarks, setQuality, describe, ready: true, state: () => ({ pending: T.pendingForView(), detailPending: T.detInflight, loaded: T.loaded.size, totals: T.totals(), stats: R.stats, cam: { t: cam.target, d: cam.dist }, plane: fs.plane, gpuMs, gpuBusy, dirty }), render: () => { dirty = true; } };
   } catch (e: any) {
     console.error(e);
     fail(`${String(e?.message || e)}<br><br>See the browser console for details.`);
@@ -126,7 +128,7 @@ function bookmarkState(b: Bookmark): CamState {
 function applyBookmark(i: number, animate = true, onDone?: () => void) {
   const b = bookmarks[i];
   if (!b) return;
-  if (fs.organelle && i !== 0) setOrganelle(false);
+  if ((fs.organelle || fs.memColors) && i !== 0) setDisplayMode('molecules');
   const st = bookmarkState(b);
   const n1 = norm(b.normal), d1 = dot(n1, b.target);
   const n0 = planeN(), d0 = fs.plane[3], s0 = fs.slab;
@@ -170,7 +172,21 @@ function tourStep(now: number) {
 }
 
 // ---------------------------------------------------------------- selection / search
+let selModule = -1;
+/** highlight every type of one interaction module (legend of the module colouring); -1 clears */
+function setModule(m: number) {
+  if (selType >= 0) { typeFlags[selType] &= ~1; selType = -1; renderSelType(); }
+  selModule = m;
+  for (let i = 0; i < typeFlags.length; i++) {
+    if (m >= 0 && lib.moduleOf[i] === m) typeFlags[i] |= 1; else typeFlags[i] &= ~1;
+  }
+  fs.highlight = m >= 0;
+  R.device.queue.writeBuffer(R.typeFlags, 0, typeFlags);
+  renderLegend();
+  dirty = true;
+}
 function setType(t: number) {
+  if (selModule >= 0) setModule(-1);
   if (selType >= 0) typeFlags[selType] &= ~1;
   selType = t;
   if (t >= 0) typeFlags[t] |= 1;
@@ -235,7 +251,7 @@ function flyToNearest(type: number) {
   const n = planeN();
   const st = cam.state(); st.target = c; st.dist = cam.distForWidth(width * 2.5, canvas.clientWidth / canvas.clientHeight);
   fs.cutOn = true; ($('cutOn') as HTMLInputElement).checked = true;
-  if (fs.organelle) setOrganelle(false);
+  if (fs.organelle || fs.memColors) setDisplayMode('molecules');
   cam.flyTo(st, 2200, () => {
     setPlane(n, dot(n, c) - 20);
     const L = T.loaded.get(best);
@@ -381,14 +397,30 @@ async function openMolstar(type: number) {
 }
 
 // ---------------------------------------------------------------- display modes
+let orgMeshesRequested = false;
+function loadOrganelleMeshes() {
+  if (orgMeshesRequested) return;
+  orgMeshesRequested = true;
+  toast('Loading organelle surfaces (6.7 MB)…');
+  fetchBin('organelle_meshes.bin.gz').then(b => { R.uploadOrganelleMeshes(b); dirty = true; });
+}
+// membranes view = the Show list with only Membranes ticked (fs.memColors); set up with the Show list
+let setMembraneView: (on: boolean) => void = () => {};
+function syncModeButtons() {
+  const mem = fs.memColors && !fs.organelle;
+  $('modeSection').classList.toggle('on', !fs.organelle && !mem); $('modeOrg').classList.toggle('on', fs.organelle);
+  $('modeMem').classList.toggle('on', mem);
+}
 function setOrganelle(on: boolean) {
   fs.organelle = on;
-  $('modeSection').classList.toggle('on', !on); $('modeOrg').classList.toggle('on', on);
-  if (on && !R.organelleMeshes.length) {
-    toast('Loading organelle surfaces (6.7 MB)…');
-    fetchBin('organelle_meshes.bin.gz').then(b => { R.uploadOrganelleMeshes(b); dirty = true; });
-  }
+  if (on) loadOrganelleMeshes();
+  syncModeButtons();
   dirty = true;
+}
+function setDisplayMode(m: 'molecules' | 'organelles' | 'membranes') {
+  if (m !== 'membranes' && fs.memColors) setMembraneView(false);
+  setOrganelle(m === 'organelles');
+  if (m === 'membranes') setMembraneView(true);
 }
 function setQuality(q: string) {
   quality = q;
@@ -407,6 +439,14 @@ function renderLegend() {
   else if (m === 1) el.innerHTML = sw('#4C8CD9', 'experimental (PDB)') + sw('#F5A84C', 'AlphaFold model');
   else if (m === 2) el.innerHTML = sw('#0053D6', 'pLDDT > 90') + sw('#65CBF3', '70–90') + sw('#FFDB13', '50–70') + sw('#B8B8B8', 'experimental (PDB)');
   else if (m === 3) el.innerHTML = `<div style="grid-column: 1 / 3"><div style="height:8px;border-radius:3px;background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)"></div><div style="display:flex;justify-content:space-between"><span>1</span><span>10³</span><span>10⁶ copies</span></div></div>`;
+  else if (m === 6) {
+    el.innerHTML = lib.modules.length
+      ? '<div class="sub" style="grid-column: 1 / 3">Click a module to highlight it</div>' +
+        lib.modules.map((x, i) => `<div class="modsw${selModule === i ? ' on' : ''}" data-m="${i}" title="${x.n} proteins"><span class="sw" style="background:${moduleColor(i)}"></span>${x.label}</div>`).join('') +
+        sw('#D1D1CC', 'no module')
+      : '<div style="grid-column: 1 / 3">No interaction modules in this build</div>';
+    el.querySelectorAll<HTMLElement>('.modsw').forEach(d => d.onclick = () => { const i = Number(d.dataset.m); setModule(selModule === i ? -1 : i); });
+  }
   else if (m === 5) el.innerHTML = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 18, 19].map(i => sw(PAL[i], REGION_NAMES[i])).join('');
   else el.innerHTML = '';
 }
@@ -430,6 +470,7 @@ function buildUI() {
     const nI = idx.nInst.reduce((a, b) => a + b, 0);
     $('subCount').innerHTML = `<b>Preview:</b> ${idx.n} of 6,416 tiles (${(nI / 1e3).toFixed(0)} k molecules) from the full ${(total / 1e6).toFixed(1)} M-molecule cell. The full cell is in yeast_cell_viewer.zip.`;
     ($('modeOrg') as HTMLButtonElement).disabled = true; $('modeOrg').title = 'Organelle surfaces are only in the full app';
+    ($('modeMem') as HTMLButtonElement).disabled = true; $('modeMem').title = 'Membrane surfaces are only in the full app';
   }
   // views
   const v = $('views');
@@ -490,9 +531,14 @@ function buildUI() {
   $('flipBtn').onclick = () => { const n = planeN(); const st = cam.state(); const tgt = cam.target; const nn = scale(n, -1) as V3; setPlane(nn, -fs.plane[3]);
     st.fwd = scale(st.fwd, -1) as V3; st.target = tgt; cam.flyTo(st, 1200); };
   // display
-  $('modeSection').onclick = () => setOrganelle(false);
-  $('modeOrg').onclick = () => setOrganelle(true);
-  $<HTMLSelectElement>('colorMode').onchange = (e) => { fs.colorMode = Number((e.target as HTMLSelectElement).value); renderLegend(); dirty = true; };
+  $('modeSection').onclick = () => setDisplayMode('molecules');
+  $('modeOrg').onclick = () => setDisplayMode('organelles');
+  $('modeMem').onclick = () => setDisplayMode('membranes');
+  $<HTMLSelectElement>('colorMode').onchange = (e) => {
+    fs.colorMode = Number((e.target as HTMLSelectElement).value);
+    if (fs.colorMode !== 6 && selModule >= 0) setModule(-1);
+    renderLegend(); dirty = true;
+  };
   $<HTMLInputElement>('shaded').onchange = (e) => { fs.shaded = (e.target as HTMLInputElement).checked; dirty = true; };
   $<HTMLSelectElement>('motion').onchange = (e) => { fs.motion = Number((e.target as HTMLSelectElement).value); (e.target as HTMLElement).blur(); dirty = true; };
   $<HTMLInputElement>('outlines').onchange = (e) => { fs.outline = (e.target as HTMLInputElement).checked ? 1 : 0; dirty = true; };
@@ -519,19 +565,30 @@ function buildUI() {
   ];
   const boxes: HTMLInputElement[] = [];
   const allRegions = REGION_NAMES.map((_, i) => i);
+  // only membranes shown: colour them by the compartment they enclose (the section map's colours)
+  const mem = classes.findIndex(([name]) => name === 'Membranes');
+  // (the whole cell's membrane surfaces, as in organelle mode, without the cut: see renderer.frame)
+  const syncMemColors = () => {
+    fs.memColors = boxes.every((b, k) => b.checked === (k === mem)) && !(window as any).__YC_PREVIEW__;   // preview: no surfaces
+    if (fs.memColors) loadOrganelleMeshes();
+    syncModeButtons();
+    dirty = true;
+  };
   const setAll = (on: (k: number) => boolean) => {
     classes.forEach(([, , f], k) => { boxes[k].checked = on(k); f(on(k)); });
     const regionsOn = classes.every((_, k) => on(k));       // "only": every compartment off (e.g. cell-wall proteins too)
     setRegions(allRegions, regionsOn);
+    syncMemColors();
   };
   classes.forEach(([name, col, f], k) => {
     const l = document.createElement('label'); l.className = 'chk';
     l.innerHTML = `<input type="checkbox" checked><span class="sw" style="background:${col}"></span><span class="nm">${name}</span><a class="only" title="Show only ${name.toLowerCase()}">only</a>`;
     const box = l.querySelector('input') as HTMLInputElement; boxes.push(box);
-    box.onchange = () => f(box.checked);
+    box.onchange = () => { f(box.checked); syncMemColors(); };
     (l.querySelector('.only') as HTMLElement).onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAll(j => j === k); };
     show.appendChild(l);
   });
+  setMembraneView = (on) => setAll(on ? (j => j === mem) : (() => true));
   $('showAll').onclick = () => setAll(() => true);
   $('hideAll').onclick = () => setAll(() => false);
   const rl = $('regionList');
@@ -659,7 +716,8 @@ function setupInput() {
     else if (k === ',' || k === '.' || e.code === 'Comma' || e.code === 'Period') {   // Alt: one fine step (Option changes e.key on macOS)
       const fwd = k === '.' || e.code === 'Period';
       movePlane((fwd ? 1 : -1) * (e.altKey ? nudgeStep : Math.max(2, fs.slab * 0.25))); }
-    else if (k === 'o') setOrganelle(!fs.organelle);
+    else if (k === 'o') setDisplayMode(fs.organelle ? 'molecules' : 'organelles');
+    else if (k === 'm') setDisplayMode(fs.memColors && !fs.organelle ? 'molecules' : 'membranes');
     else if (k === 't') (tour ? stopTour() : startTour());
     else if (k === 'p') screenshot();
     else if (k === 'escape') { select(null); setType(-1); }
@@ -791,7 +849,7 @@ function renderNow(force = false) {
 }
 let hudT = 0;
 function tileTick() {
-  T.update(cam, canvas.clientWidth / canvas.clientHeight, fs.cutOn, fs.plane, fs.slab, fs.organelle, R.height);
+  T.update(cam, canvas.clientWidth / canvas.clientHeight, fs.cutOn, fs.plane, fs.slab, fs.organelle || fs.memColors, R.height);
   lastUpdate = performance.now();
   if (T.inflight || T.detInflight) dirty = true;
 }

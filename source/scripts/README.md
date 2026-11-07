@@ -5,11 +5,13 @@ These scripts replace the notebook cells in `notebook/pipeline_driver_notebook.i
 | Script | Notebook cells | Output | Time (12 cores) |
 |---|---|---|---|
 | `s1_inventory.py` | 1–4, 22 + `pipeline/assemblies.py` | `work/results/inventory/{ingredients.csv, oligo_map.json, complexes_*.csv, oligomers.csv}`; new library entries in `pipeline/lib/` | ~1 h on the first run (RCSB queries), ~1 min once `work/rcsb_cache.json` exists |
-| `s2_geometry.py` | 24, 25 (+ re-index from 28) | `work/yc3d/{geometry.json, tile_measure.parquet, tile_labvol.parquet, geom/}` | 15 s |
-| `s3_pack.py` | 27–29 | `work/yc3d/{tiles_raw/, tile_counts.parquet, prepass.npz, expected_totals.parquet, pack_summary.parquet}` | 1 min |
+| `s2_geometry.py` (`--sphere`: analytic cell instead of the real shapes) | 24, 25 (+ re-index from 28) | `work/yc3d/{geometry.json, tile_measure.parquet, tile_labvol.parquet, geom/}` | 15 s |
+| `s3_pack.py` (`--random`: no organisation layer) | 27–29 | `work/yc3d/{tiles_raw/, tile_counts.parquet, prepass.npz, expected_totals.parquet, pack_summary.parquet}` | 1 min |
 | `s4_validate.py` | 31–36 | `work/results/wholecell3d_validation.json`, `work/yc3d/libpack_meta.npz` | 30 s |
 | `s5_encode.py` | 38–45 | `work/yc3d/web/data/` | 30 s (needs the AFDB tar for per-residue pLDDT) |
 | `s6_motion.py` (optional) | — | `work/conformers/{kept_residues, pool_modes}.npz`; `library/modes.{bin,json}` in the encoded data. Needs `POOL_DB` (pool predictions, foldcomp) and `POOL_PY` (a Python with foldcomp); `MOTION_CAP` sets the amplitude cap in nm (default 0 = none). `--skip-fit` only re-encodes | ~100 min fit (10 cores); 6 s re-encode |
+| `cell_meshes.py` (optional) | — | `pipeline/cell_meshes.npz`: the segmented meshes of the model cell (`YC_ORGANELLE_MESHES`); the file is in the repository, so this only re-extracts it | 5 s |
+| `organelle_stats.py` (optional) | — | `pipeline/organelle_stats.json` from segmented cryo-FIB/SEM meshes (`YC_ORGANELLE_MESHES`); the file is in the repository, so this only re-derives it | 5 s |
 | `deploy_viewer.sh` | — | builds `web/app` (Node in `.node/`) and installs `index.html`, `assets/` and `data/` into the viewer folder; keeps the previous version as `*_prev` | 10 s |
 | `check_inventory.py` | — | copy conservation of the inventory against the proteome | 5 s |
 
