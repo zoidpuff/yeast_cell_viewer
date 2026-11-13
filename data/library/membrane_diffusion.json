@@ -1,0 +1,47 @@
+{
+ "note": "factor on the Saffman-Delbrueck D of membrane proteins per membrane; MODEL.md 14.2",
+ "membranes": [
+  "PM",
+  "ER",
+  "NE",
+  "VAC",
+  "MITO_OM",
+  "MITO_IM",
+  "GOLGI",
+  "PEROX"
+ ],
+ "scale": [
+  0.000585,
+  0.034993,
+  0.079136,
+  0.015598,
+  0.034993,
+  0.034993,
+  0.034993,
+  0.034993
+ ],
+ "measured": {
+  "ER": {
+   "factor": 0.03499295673008304,
+   "n": 5
+  },
+  "NE": {
+   "factor": 0.07913586210873622,
+   "n": 6
+  },
+  "PM": {
+   "factor": 0.0005854036774608531,
+   "n": 3
+  },
+  "VAC": {
+   "factor": 0.01559779311128714,
+   "n": 1
+  }
+ },
+ "assumed_equal_to_ER": [
+  "MITO_OM",
+  "MITO_IM",
+  "GOLGI",
+  "PEROX"
+ ]
+}
